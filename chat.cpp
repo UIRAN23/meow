@@ -17,7 +17,8 @@
 using namespace std;
 using json = nlohmann::json;
 
-// --- КОНФИГ ---
+// --- КОНФИГ И ВЕРСИЯ ---
+const string VERSION = "1.0";
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
@@ -109,7 +110,7 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// --- UTF-8 SAFE REDRAW ---
+// --- ОТРИСОВКА С ПОДДЕРЖКОЙ UTF-8 ---
 
 void redraw_chat() {
     if (!need_redraw) return;
@@ -202,6 +203,8 @@ void refresh_loop() {
     }
 }
 
+// --- MAIN ---
+
 int main() {
     setlocale(LC_ALL, "");
     cfg = string(getenv("HOME")) + "/.fntm/config.dat";
@@ -223,12 +226,25 @@ int main() {
     chat_win = newwin(my - 5, mx, 0, 0);
     input_win = newwin(5, mx, my - 5, 0);
     keypad(input_win, TRUE);
+    
+    // Загрузка последних сообщений перед стартом
+    try {
+        auto data = json::parse(request("GET", 15, 0));
+        for (int i = data.size()-1; i >= 0; i--) {
+            string s = data[i].value("sender", "???"), p = from_z(data[i].value("payload", ""));
+            string d = aes_256(p, my_pass, false);
+            chat_history.push_back("[" + s + "]: " + (d == "ERR" ? "[Crypted]" : d));
+        }
+        if(!data.empty()) last_id = to_string(data[0].value("id", 0));
+    } catch(...) {}
+
     thread(refresh_loop).detach();
 
     string input_buf = "";
     while(true) {
         werase(input_win); box(input_win, 0, 0);
-        mvwprintw(input_win, 1, 1, "[%s@%s]", my_nick.c_str(), my_room.c_str());
+        mvwprintw(input_win, 1, 1, "[%s@%s] v%s", my_nick.c_str(), my_room.c_str(), VERSION.c_str());
+        
         string prompt = "> " + input_buf;
         for (size_t i = 0; i < prompt.length(); i += (mx - 2)) {
             if (2 + (int)(i / (mx - 2)) < 4)
@@ -243,6 +259,12 @@ int main() {
         else if (ch == '\n' || ch == 10 || ch == 13) {
             if (input_buf == "/exit") break;
             if (input_buf == "/reset") { remove(cfg.c_str()); break; }
+            if (input_buf == "/update") {
+                endwin();
+                cout << "\e[34m[*] Запуск инсталлера для обновления...\e[0m" << endl;
+                system("bash ~/install2.sh");
+                exit(0);
+            }
             if (!input_buf.empty()) {
                 string msg = input_buf; input_buf = "";
                 thread([msg](){
