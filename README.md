@@ -10,5 +10,5 @@ export TERM=xterm-256color
 termux-wake-lock
 stty cols 80 rows 24
 ~/meoww' > ~/.shortcuts/chat && chmod +x ~/.shortcuts/chat
-7. После можете сделай termux widget (если не появился meoww то перезагрузите.
+7. После можете сделай termux widget (если не появился chat то перезагрузите.
 8. Запускаете как сказано из виджета или из ~ директории командой ./meoww
