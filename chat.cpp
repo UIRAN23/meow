@@ -143,7 +143,8 @@ void refresh_loop() {
             bool upd = false;
             lock_guard<mutex> l(mtx);
             for (int i = data.size()-1; i >= 0; i--) {
-                string id = to_string(data[i].value("id", 0));
+  //количество прогружаемых сообщений
+              string id = to_string(data[i].value("id", 5));
                 if (stoll(id) > (last_id.empty() ? 0 : stoll(last_id))) {
                     string snd = data[i].value("sender", ""), d = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
                     chat_history.push_back("[" + snd + "]: " + d);
