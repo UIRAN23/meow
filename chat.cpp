@@ -102,7 +102,6 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// Загрузка СТАРЫХ сообщений (при скролле вверх)
 void load_older_messages_async() {
     if (is_loading) return;
     is_loading = true;
@@ -158,7 +157,7 @@ void redraw_chat() {
 
 void refresh_loop() {
     while(true) {
-        string r = request("GET", 10, 0); // Проверяем верхушку базы
+        string r = request("GET", 10, 0); 
         if (!r.empty() && r[0] == '[') {
             auto data = json::parse(r);
             bool upd = false;
@@ -219,7 +218,7 @@ int main() {
         if (ch == KEY_UP) { 
             scroll_pos++;
             need_redraw = true;
-            // Если мы долистали почти до верха того, что загружено — подгружаем еще старых
+            
             if (scroll_pos + 5 > (int)chat_history.size()) {
                 load_older_messages_async();
             }
