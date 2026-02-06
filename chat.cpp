@@ -20,7 +20,7 @@
 using namespace std;
 using json = nlohmann::json;
 
-const string VERSION = "4_r";
+const string VERSION = "3.0_release";
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
@@ -29,20 +29,24 @@ string my_pass, my_nick, my_room, cfg;
 WINDOW *chat_win, *input_win;
 mutex mtx;
 
-vector<pair<string, string>> chat_history; // {ID, Текст}
+vector<pair<string, string>> chat_history;
 set<string> known_ids; 
 int scroll_pos = 0;
 const int LOAD_STEP = 15;
 bool need_redraw = true;
 bool is_loading = false;
 
-// --- УВЕДОМЛЕНИЯ ---
+// --- УВЕДОМЛЕНИЯ С ПЕРЕХОДОМ В ЧАТ ---
 void notify(string author, string text) {
     if (author == my_nick || author.empty()) return;
     string clean_text = text;
     replace(clean_text.begin(), clean_text.end(), '\'', ' ');
     replace(clean_text.begin(), clean_text.end(), '\"', ' ');
-    string cmd = "termux-notification --title 'Чат: " + author + "' --content '" + clean_text + "' --id fntm_notif --priority high --sound";
+    
+    // При клике на уведомление открывается ярлык ~/.shortcuts/chat
+    string cmd = "termux-notification --title 'Чат: " + author + "' --content '" + clean_text + 
+                 "' --id fntm_notif --priority high --sound " +
+                 "--action 'termux-open-url termux://shortcuts/chat'";
     system(cmd.c_str());
 }
 
@@ -111,38 +115,40 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// --- ВОРКЕР ---
+// --- ВОРКЕР С ЗАЩИТОЙ ОТ ПАДЕНИЙ ---
 void background_worker() {
     bool is_first_run = true;
     long long max_seen_id = 0;
     while(true) {
-        string res = request("GET", 10, 0);
-        if (!res.empty() && res[0] == '[') {
-            auto data = json::parse(res);
-            if (is_first_run) {
-                for (auto& item : data) {
-                    long long id = item.value("id", 0LL);
-                    known_ids.insert(to_string(id));
-                    if (id > max_seen_id) max_seen_id = id;
-                }
-                is_first_run = false;
-            } else {
-                for (int i = data.size()-1; i >= 0; i--) {
-                    long long cur_id = data[i].value("id", 0LL);
-                    string s_id = to_string(cur_id);
-                    if (known_ids.find(s_id) == known_ids.end()) {
-                        if (cur_id > max_seen_id) {
-                            string snd = data[i].value("sender", "");
-                            string msg = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
-                            notify(snd, msg);
-                            max_seen_id = cur_id;
+        try {
+            string res = request("GET", 10, 0);
+            if (!res.empty() && res[0] == '[') {
+                auto data = json::parse(res);
+                if (is_first_run) {
+                    for (auto& item : data) {
+                        long long id = item.value("id", 0LL);
+                        known_ids.insert(to_string(id));
+                        if (id > max_seen_id) max_seen_id = id;
+                    }
+                    is_first_run = false;
+                } else {
+                    for (int i = data.size()-1; i >= 0; i--) {
+                        long long cur_id = data[i].value("id", 0LL);
+                        string s_id = to_string(cur_id);
+                        if (known_ids.find(s_id) == known_ids.end()) {
+                            if (cur_id > max_seen_id) {
+                                string snd = data[i].value("sender", "");
+                                string dec = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
+                                if (dec != "ERR") notify(snd, dec);
+                                max_seen_id = cur_id;
+                            }
+                            known_ids.insert(s_id);
                         }
-                        known_ids.insert(s_id);
                     }
                 }
             }
-        }
-        sleep(5);
+        } catch (...) { /* Пропуск ошибок JSON/сети */ }
+        sleep(10);
     }
 }
 
@@ -181,18 +187,20 @@ void load_older_messages_async() {
         { lock_guard<mutex> l(mtx); offset = chat_history.size(); }
         string r = request("GET", LOAD_STEP, offset);
         if (!r.empty() && r[0] == '[') {
-            auto data = json::parse(r);
-            lock_guard<mutex> l(mtx);
-            for (auto& item : data) {
-                string id = to_string(item.value("id", 0));
-                if (known_ids.find(id) == known_ids.end()) {
-                    string s = item.value("sender", "???"), p = from_z(item.value("payload", ""));
-                    string d = aes_256(p, my_pass, false);
-                    chat_history.insert(chat_history.begin(), {id, "[" + s + "]: " + d});
-                    known_ids.insert(id);
+            try {
+                auto data = json::parse(r);
+                lock_guard<mutex> l(mtx);
+                for (auto& item : data) {
+                    string id = to_string(item.value("id", 0));
+                    if (known_ids.find(id) == known_ids.end()) {
+                        string s = item.value("sender", "???"), p = from_z(item.value("payload", ""));
+                        string d = aes_256(p, my_pass, false);
+                        chat_history.insert(chat_history.begin(), {id, "[" + s + "]: " + d});
+                        known_ids.insert(id);
+                    }
                 }
-            }
-            need_redraw = true;
+                need_redraw = true;
+            } catch (...) {}
         }
         is_loading = false;
     }).detach();
@@ -201,7 +209,7 @@ void load_older_messages_async() {
 int main(int argc, char** argv) {
     setlocale(LC_ALL, "");
     cfg = string(getenv("HOME")) + "/.fntm/config.dat";
-    
+
     if (argc > 1 && string(argv[1]) == "--bg") {
         ifstream fi(cfg);
         if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
@@ -212,16 +220,18 @@ int main(int argc, char** argv) {
     ifstream fi(cfg);
     if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
 
-    // --- УМНАЯ ПРОВЕРКА ПРОЦЕССА БЕЗ ЗАПИСИ НА ДИСК ---
+    // --- УМНАЯ ПРОВЕРКА ПРОЦЕССА (БЕЗ ГЛЮКОВ GREP) ---
     char path[1024];
     ssize_t l = readlink("/proc/self/exe", path, sizeof(path)-1);
     if (l != -1) {
         path[l] = '\0';
         string full_path = string(path);
         string filename = full_path.substr(full_path.find_last_of("/\\") + 1);
+
+        // Используем [m]eoww чтобы grep не нашел сам себя
+        string smart_grep = "[" + filename.substr(0,1) + "]" + filename.substr(1);
+        string check_cmd = "ps aux | grep '" + smart_grep + "' | grep '\\--bg'";
         
-        // Команда для поиска процесса в памяти
-        string check_cmd = "ps aux | grep '" + filename + "' | grep '\\--bg' | grep -v grep";
         FILE* pipe = popen(check_cmd.c_str(), "r");
         bool already_running = false;
         if (pipe) {
@@ -257,30 +267,30 @@ int main(int argc, char** argv) {
         while(true) {
             string r = request("GET", 15, 0); 
             if (!r.empty() && r[0] == '[') {
-                auto data = json::parse(r);
-                bool upd = false;
-                lock_guard<mutex> l(mtx);
-                for (int i = data.size()-1; i >= 0; i--) {
-                    string id = to_string(data[i].value("id", 0));
-                    if (known_ids.find(id) == known_ids.end()) {
-                        string snd = data[i].value("sender", ""), d = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
-                        chat_history.push_back({id, "[" + snd + "]: " + d});
-                        known_ids.insert(id);
-                        upd = true;
+                try {
+                    auto data = json::parse(r);
+                    bool upd = false;
+                    lock_guard<mutex> l(mtx);
+                    for (int i = data.size()-1; i >= 0; i--) {
+                        string id = to_string(data[i].value("id", 0));
+                        if (known_ids.find(id) == known_ids.end()) {
+                            string snd = data[i].value("sender", ""), d = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
+                            chat_history.push_back({id, "[" + snd + "]: " + d});
+                            known_ids.insert(id);
+                            upd = true;
+                        }
                     }
-                }
-                // Быстрая очистка при просмотре свежих сообщений
-                if (scroll_pos == 0) {
-                    int del = 0;
-                    while (chat_history.size() > 20 && del < 4) {
-                        known_ids.erase(chat_history[0].first);
-                        chat_history.erase(chat_history.begin());
-                        del++; upd = true;
+                    if (scroll_pos == 0) {
+                        while (chat_history.size() > 25) {
+                            known_ids.erase(chat_history[0].first);
+                            chat_history.erase(chat_history.begin());
+                            upd = true;
+                        }
                     }
-                }
-                if (upd) need_redraw = true;
+                    if (upd) need_redraw = true;
+                } catch (...) {}
             }
-            this_thread::sleep_for(chrono::seconds(3));
+            this_thread::sleep_for(chrono::seconds(5));
         }
     }).detach();
 
@@ -309,9 +319,7 @@ int main(int argc, char** argv) {
                     request("POST", 0, 0, j.dump());
                 }).detach();
                 scroll_pos = 0; need_redraw = true;
-            } else {
-                endwin(); exit(0); // Тихий выход
-            }
+            } else { endwin(); exit(0); }
         }
         else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
             if (!input_buf.empty()) {
