@@ -20,7 +20,7 @@
 using namespace std;
 using json = nlohmann::json;
 
-const string VERSION = "5.2b";
+const string VERSION = "5.3b";
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
@@ -36,17 +36,17 @@ const int LOAD_STEP = 15;
 bool need_redraw = true;
 bool is_loading = false;
 
-// --- УВЕДОМЛЕНИЯ С ПРЯМЫМ ВЫЗОВОМ ИНТЕНТА ---
+// --- УВЕДОМЛЕНИЯ С ПРЯМЫМ ВЫЗОВОМ ---
 void notify(string author, string text) {
     if (author == my_nick || author.empty()) return;
     string clean_text = text;
     replace(clean_text.begin(), clean_text.end(), '\'', ' ');
     replace(clean_text.begin(), clean_text.end(), '\"', ' ');
     
-    // Прямой вызов через сервис Termux (не требует виджетов)
-    string action = "am startservice -n com.termux/.app.TermuxService -a com.termux.service_execute -e com.termux.execute.arguments ~/meoww";
+    // Прямой запуск сброса терминала и входа в чат
+    string action = "am startservice -n com.termux/.app.TermuxService -a com.termux.service_execute -e com.termux.execute.arguments '~/meoww'";
     string cmd = "termux-notification --title 'Чат: " + author + "' --content '" + clean_text + 
-                 "' --id fntm_notif --priority high --sound --action '" + action + "'";
+                 "' --id fntm_notif --priority high --sound --action \"" + action + "\"";
     system(cmd.c_str());
 }
 
@@ -115,7 +115,7 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// --- ВОРКЕР С ЗАЩИТОЙ ---
+// --- ВОРКЕР ---
 void background_worker() {
     bool is_first_run = true;
     long long max_seen_id = 0;
@@ -220,7 +220,6 @@ int main(int argc, char** argv) {
     ifstream fi(cfg);
     if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
 
-    // --- УМНАЯ ПРОВЕРКА ПРОЦЕССА ---
     char path[1024];
     ssize_t l = readlink("/proc/self/exe", path, sizeof(path)-1);
     if (l != -1) {
@@ -229,7 +228,6 @@ int main(int argc, char** argv) {
         string filename = full_path.substr(full_path.find_last_of("/\\") + 1);
         string smart_grep = "[" + filename.substr(0,1) + "]" + filename.substr(1);
         string check_cmd = "ps aux | grep '" + smart_grep + "' | grep '\\--bg'";
-        
         FILE* pipe = popen(check_cmd.c_str(), "r");
         bool already_running = false;
         if (pipe) {
@@ -237,7 +235,6 @@ int main(int argc, char** argv) {
             if (fgets(buf, 128, pipe)) already_running = true;
             pclose(pipe);
         }
-
         if (!already_running) {
             string cmd = full_path + " --bg > /dev/null 2>&1 &";
             system(cmd.c_str());
@@ -303,10 +300,7 @@ int main(int argc, char** argv) {
         int ch = wgetch(input_win);
         if (ch == ERR) { usleep(20000); continue; }
 
-        if (ch == KEY_UP) { 
-            scroll_pos++; need_redraw = true; 
-            if (scroll_pos + 5 > (int)chat_history.size()) load_older_messages_async(); 
-        }
+        if (ch == KEY_UP) { scroll_pos++; need_redraw = true; if (scroll_pos + 5 > (int)chat_history.size()) load_older_messages_async(); }
         else if (ch == KEY_DOWN) { if (scroll_pos > 0) { scroll_pos--; need_redraw = true; } }
         else if (ch == '\n' || ch == 10 || ch == 13) {
             if (!input_buf.empty()) {
