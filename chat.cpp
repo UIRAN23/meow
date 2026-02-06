@@ -20,7 +20,7 @@
 using namespace std;
 using json = nlohmann::json;
 
-const string VERSION = "5.3b";
+const string VERSION = "5.2p";
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
@@ -36,17 +36,19 @@ const int LOAD_STEP = 15;
 bool need_redraw = true;
 bool is_loading = false;
 
-// --- УВЕДОМЛЕНИЯ С ПРЯМЫМ ВЫЗОВОМ ---
+// --- УВЕДОМЛЕНИЯ (ПРЯМОЙ ВЫЗОВ С ПОЛНЫМ ПУТЕМ) ---
 void notify(string author, string text) {
     if (author == my_nick || author.empty()) return;
     string clean_text = text;
     replace(clean_text.begin(), clean_text.end(), '\'', ' ');
     replace(clean_text.begin(), clean_text.end(), '\"', ' ');
     
-    // Прямой запуск сброса терминала и входа в чат
-    string action = "am startservice -n com.termux/.app.TermuxService -a com.termux.service_execute -e com.termux.execute.arguments '~/meoww'";
+    // Используем полный путь к meoww для надежности
+    string full_path = "/data/data/com.termux/files/home/meoww";
+    string action = "am startservice -n com.termux/.app.TermuxService -a com.termux.service_execute -e com.termux.execute.arguments " + full_path;
+    
     string cmd = "termux-notification --title 'Чат: " + author + "' --content '" + clean_text + 
-                 "' --id fntm_notif --priority high --sound --action \"" + action + "\"";
+                 "' --id fntm_notif --priority high --sound --action '" + action + "'";
     system(cmd.c_str());
 }
 
@@ -115,7 +117,7 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// --- ВОРКЕР ---
+// --- ВОРКЕР С ЗАЩИТОЙ ---
 void background_worker() {
     bool is_first_run = true;
     long long max_seen_id = 0;
