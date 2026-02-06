@@ -20,13 +20,12 @@
 using namespace std;
 using json = nlohmann::json;
 
-const string VERSION = "2.0_stable";
+const string VERSION = "2.1_stable";
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
 
 string my_pass, my_nick, my_room, cfg;
-string last_id = "";
 WINDOW *chat_win, *input_win;
 mutex mtx;
 
@@ -101,7 +100,7 @@ string request(string method, int limit, int offset, string body = "") {
         h = curl_slist_append(h, ("apikey: " + SB_KEY).c_str());
         h = curl_slist_append(h, ("Authorization: Bearer " + SB_KEY).c_str());
         h = curl_slist_append(h, "Content-Type: application/json");
-        string url = SB_URL + "?chat_key=eq." + my_room + "&order=created_at.desc&limit=" + to_string(limit) + "&offset=" + to_string(offset);
+        string url = SB_URL + "?chat_key=eq." + my_room + "&order=id.desc&limit=" + to_string(limit) + "&offset=" + to_string(offset);
         if (method == "POST") { curl_easy_setopt(curl, CURLOPT_POST, 1L); curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str()); }
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, h);
@@ -112,33 +111,43 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// --- ЛЕГКИЙ ФОНОВЫЙ ВОРКЕР ---
+// --- ИСПРАВЛЕННЫЙ ФОНОВЫЙ ВОРКЕР ---
 void background_worker() {
-    // Получаем текущий срез сообщений, чтобы не спамить старым при запуске
-    string r = request("GET", 1, 0);
-    if (!r.empty() && r[0] == '[') {
-        auto data = json::parse(r);
-        if(!data.empty()) last_id = to_string(data[0].value("id", 0));
-    }
+    bool is_first_run = true;
+    long long max_seen_id = 0;
 
     while(true) {
-        string res = request("GET", 5, 0);
+        string res = request("GET", 10, 0); // Берем последние 10 для запаса
         if (!res.empty() && res[0] == '[') {
             auto data = json::parse(res);
-            for (int i = data.size()-1; i >= 0; i--) {
-                string id = to_string(data[i].value("id", 0));
-                if (known_ids.find(id) == known_ids.end()) {
-                    if (!last_id.empty()) { // Только если это не первая загрузка
-                        string snd = data[i].value("sender", "");
-                        string msg = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
-                        notify(snd, msg);
+            
+            if (is_first_run) {
+                // При первом запуске просто запоминаем, что уже есть в базе
+                for (auto& item : data) {
+                    long long id = item.value("id", 0LL);
+                    known_ids.insert(to_string(id));
+                    if (id > max_seen_id) max_seen_id = id;
+                }
+                is_first_run = false;
+            } else {
+                // В последующие разы уведомляем только о новых ID
+                for (int i = data.size()-1; i >= 0; i--) {
+                    long long cur_id = data[i].value("id", 0LL);
+                    string s_id = to_string(cur_id);
+                    
+                    if (known_ids.find(s_id) == known_ids.end()) {
+                        if (cur_id > max_seen_id) {
+                            string snd = data[i].value("sender", "");
+                            string msg = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
+                            notify(snd, msg);
+                            max_seen_id = cur_id;
+                        }
+                        known_ids.insert(s_id);
                     }
-                    known_ids.insert(id);
-                    last_id = id;
                 }
             }
         }
-        sleep(5); // Максимальная экономия батареи
+        sleep(5);
     }
 }
 
@@ -196,7 +205,6 @@ int main(int argc, char** argv) {
     setlocale(LC_ALL, "");
     cfg = string(getenv("HOME")) + "/.fntm/config.dat";
 
-    // ПРОВЕРКА: Если запущен как фон
     if (argc > 1 && string(argv[1]) == "--bg") {
         ifstream fi(cfg);
         if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
@@ -204,11 +212,9 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ОБЫЧНЫЙ ЗАПУСК
     ifstream fi(cfg);
     if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
 
-    // АВТО-ЗАПУСК ФОНА (Узнаем путь к самому себе)
     char path[1024];
     ssize_t l = readlink("/proc/self/exe", path, sizeof(path)-1);
     if (l != -1) {
@@ -234,10 +240,9 @@ int main(int argc, char** argv) {
     input_win = newwin(5, mx, my - 5, 0);
     keypad(input_win, TRUE); nodelay(input_win, TRUE);
 
-    // Поток обновления интерфейса
     thread([](){
         while(true) {
-            string r = request("GET", 10, 0); 
+            string r = request("GET", 15, 0); 
             if (!r.empty() && r[0] == '[') {
                 auto data = json::parse(r);
                 bool upd = false;
@@ -248,7 +253,6 @@ int main(int argc, char** argv) {
                         string snd = data[i].value("sender", ""), d = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
                         chat_history.push_back("[" + snd + "]: " + d);
                         known_ids.insert(id);
-                        last_id = id;
                         upd = true;
                     }
                 }
