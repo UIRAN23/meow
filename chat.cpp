@@ -20,7 +20,7 @@
 using namespace std;
 using json = nlohmann::json;
 
-const string VERSION = "5.r";
+const string VERSION = "5.1b";
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
@@ -29,7 +29,7 @@ string my_pass, my_nick, my_room, cfg;
 WINDOW *chat_win, *input_win;
 mutex mtx;
 
-vector<pair<string, string>> chat_history;
+vector<pair<string, string>> chat_history; 
 set<string> known_ids; 
 int scroll_pos = 0;
 const int LOAD_STEP = 15;
@@ -43,7 +43,7 @@ void notify(string author, string text) {
     replace(clean_text.begin(), clean_text.end(), '\'', ' ');
     replace(clean_text.begin(), clean_text.end(), '\"', ' ');
     
-    // При клике на уведомление открывается ярлык ~/.shortcuts/chat
+    // Переход через Shortcut (требуется Termux:Widget)
     string cmd = "termux-notification --title 'Чат: " + author + "' --content '" + clean_text + 
                  "' --id fntm_notif --priority high --sound " +
                  "--action 'termux-open-url termux://shortcuts/chat'";
@@ -115,7 +115,7 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// --- ВОРКЕР С ЗАЩИТОЙ ОТ ПАДЕНИЙ ---
+// --- ВОРКЕР С ЗАЩИТОЙ ---
 void background_worker() {
     bool is_first_run = true;
     long long max_seen_id = 0;
@@ -147,7 +147,7 @@ void background_worker() {
                     }
                 }
             }
-        } catch (...) { /* Пропуск ошибок JSON/сети */ }
+        } catch (...) {}
         sleep(10);
     }
 }
@@ -220,15 +220,13 @@ int main(int argc, char** argv) {
     ifstream fi(cfg);
     if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
 
-    // --- УМНАЯ ПРОВЕРКА ПРОЦЕССА (БЕЗ ГЛЮКОВ GREP) ---
+    // --- УМНАЯ ПРОВЕРКА ПРОЦЕССА ---
     char path[1024];
     ssize_t l = readlink("/proc/self/exe", path, sizeof(path)-1);
     if (l != -1) {
         path[l] = '\0';
         string full_path = string(path);
         string filename = full_path.substr(full_path.find_last_of("/\\") + 1);
-
-        // Используем [m]eoww чтобы grep не нашел сам себя
         string smart_grep = "[" + filename.substr(0,1) + "]" + filename.substr(1);
         string check_cmd = "ps aux | grep '" + smart_grep + "' | grep '\\--bg'";
         
