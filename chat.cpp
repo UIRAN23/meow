@@ -19,6 +19,7 @@
 
 using namespace std;
 using json = nlohmann::json;
+const string VERSION = "5.0";
 
 // --- НАСТРОЙКИ ---
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
