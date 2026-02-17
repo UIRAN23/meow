@@ -19,12 +19,19 @@ if [ "$FREE_MB" -lt 100 ]; then
     exit 1
 fi
 
-# 2. Версии
+# 2. Локальная версия
 [ -f "$VER_FILE" ] && LOCAL_VER=$(cat "$VER_FILE") || LOCAL_VER="0.0"
-REMOTE_VER=$(curl -sL "$RAW_CPP_URL" | head -n 50 | grep "VERSION =" | cut -d'"' -f2)
+
+# 3. Версия с GitHub (Исправленный поиск)
+echo -e "${B}[*] Запрос версии с GitHub...${N}"
+# Скачиваем первые 100 строк во временную переменную
+RAW_CONTENT=$(curl -sL "$RAW_CPP_URL" | head -n 100)
+# Ищем строку VERSION с любым количеством пробелов и возможным const
+REMOTE_VER=$(echo "$RAW_CONTENT" | grep -E "VERSION\s*=" | cut -d'"' -f2 | head -n 1)
 
 if [ -z "$REMOTE_VER" ]; then
     echo -e "${R}[-] Ошибка: версия на GitHub не найдена.${N}"
+    echo -e "${Y}[!] Убедитесь, что в chat.cpp есть строка: string VERSION = \"5.0\";${N}"
     exit 1
 fi
 
@@ -39,23 +46,28 @@ else
     [[ ! $conf =~ ^[Nn]$ ]] && DO_INSTALL=true
 fi
 
-# 3. Компиляция
+# 4. Компиляция
 if [ "$DO_INSTALL" = true ]; then
     echo -e "${B}[*] Сборка v$REMOTE_VER (Web Interface)...${N}"
     curl -L "$RAW_CPP_URL" -o "chat.cpp"
 
-    # ВАЖНО: новая команда компиляции без ncurses
+    # Добавляем проверку наличия httplib.h перед компиляцией
+    if [ ! -f "httplib.h" ]; then
+        curl -L "https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h" -o "httplib.h"
+    fi
+
     if clang++ -O3 chat.cpp -lcurl -lssl -lcrypto -lpthread -o ~/meoww; then
         echo "$REMOTE_VER" > "$VER_FILE"
         echo -e "${G}[OK] Успешно! Откройте http://localhost:8080 после запуска.${N}"
-        
-        # Обновляем ярлык (убираем reset, добавляем уведомление)
+
+        # Обновляем ярлык
+        mkdir -p ~/.shortcuts
         printf '#!/data/data/com.termux/files/usr/bin/bash\ntermux-wake-lock\necho "Сервер запущен на http://localhost:8080"\n~/meoww\n' > ~/.shortcuts/chat && chmod +x ~/.shortcuts/chat
-        
+
         pkill -f "meoww" || true
         rm chat.cpp
     else
-        echo -e "${R}[-] Ошибка компиляции! Проверьте наличие httplib.h${N}"
+        echo -e "${R}[-] Ошибка компиляции!${N}"
         exit 1
     fi
 else
