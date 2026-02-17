@@ -4,10 +4,10 @@ G='\e[32m'
 B='\e[34m'
 N='\e[0m'
 
-echo -e "${G}[*] Подготовка системы meoww...${N}"
+echo -e "${G}[*] Подготовка системы meoww (Web Edition)...${N}"
 
-# Список нужных пакетов
-PKGS=("clang" "libcurl" "openssl" "ncurses-utils" "termux-api" "nlohmann-json")
+# Список нужных пакетов (убрали ncurses, добавили openssl)
+PKGS=("clang" "libcurl" "openssl" "termux-api" "nlohmann-json")
 
 for pkg in "${PKGS[@]}"; do
     if ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -15,5 +15,11 @@ for pkg in "${PKGS[@]}"; do
         pkg install -y "$pkg"
     fi
 done
-echo -e "${G}[OK] Установка завершена!${N}"
 
+# Скачиваем httplib.h, если его нет (нужен для компиляции)
+if [ ! -f "httplib.h" ]; then
+    echo -e "${B}[*] Скачивание сетевого модуля httplib...${N}"
+    curl -L "https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h" -o "httplib.h"
+fi
+
+echo -e "${G}[OK] Установка зависимостей завершена!${N}"
