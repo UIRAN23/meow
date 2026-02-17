@@ -20,7 +20,7 @@
 using namespace std;
 using json = nlohmann::json;
 
-string VERSION = "5.0"; 
+string VERSION = "5.1"; 
 
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
@@ -31,13 +31,12 @@ vector<pair<string, string>> chat_history;
 set<string> known_ids;
 mutex mtx;
 
-// --- КРИПТО ---
 string aes_256(string text, string pass, bool enc) {
     unsigned char key[32], iv[16] = {0};
     SHA256((unsigned char*)pass.c_str(), pass.length(), key);
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     int len, flen; 
-    unsigned char* out = new unsigned char[text.length() + 1024 * 1024 * 2]; 
+    unsigned char* out = new unsigned char[text.length() + 1024 * 1024 * 3]; 
     if(enc) {
         EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
         EVP_EncryptUpdate(ctx, out, &len, (unsigned char*)text.c_str(), text.length());
@@ -126,64 +125,45 @@ int main() {
     cfg = string(getenv("HOME")) + "/.fntm/config.dat";
     ifstream fi(cfg);
     if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
-    else { cout << "Error: config not found!" << endl; return 1; }
+    else { return 1; }
 
     thread(update_loop).detach();
     httplib::Server svr;
 
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-        // Разрезали R-строку, чтобы безопасно вставить my_nick
-        string html = R"(<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
-            body { font-family: sans-serif; background: #000; color: #eee; margin: 0; display: flex; flex-direction: column; height: 100vh; }
-            #chat { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 10px; }
-            .msg { background: #222; padding: 10px; border-radius: 12px; max-width: 85%; align-self: flex-start; }
-            .msg.me { align-self: flex-end; background: #007bff; }
-            .msg img { max-width: 100%; border-radius: 8px; display: block; margin-top: 5px; }
-            #bar { background: #111; padding: 10px; display: flex; gap: 10px; border-top: 1px solid #333; }
-            input[type="text"] { flex: 1; background: #222; border: none; color: white; padding: 12px; border-radius: 20px; outline: none; }
-            button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 20px; }
-        </style></head><body><div id="chat"></div><div id="bar">
-            <div id="cam" style="cursor:pointer;font-size:24px">📷</div>
-            <input type="file" id="fIn" accept="image/*" style="display:none">
-            <input type="text" id="mIn" placeholder="Сообщение...">
-            <button onclick="send()">></button>
-        </div><script>)";
+        string html = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><style>";
+        html += "body{font-family:sans-serif;background:#000;color:#eee;margin:0;display:flex;flex-direction:column;height:100vh;}";
+        html += "#chat{flex:1;overflow-y:auto;padding:15px;display:flex;flex-direction:column;gap:10px;}";
+        html += ".msg{background:#222;padding:10px;border-radius:12px;max-width:85%;align-self:flex-start;}";
+        html += ".msg.me{align-self:flex-end;background:#007bff;}";
+        html += ".msg img{max-width:100%;border-radius:8px;display:block;margin-top:5px;}";
+        html += "#bar{background:#111;padding:10px;display:flex;gap:10px;border-top:1px solid #333;}";
+        html += "input[type='text']{flex:1;background:#222;border:none;color:white;padding:12px;border-radius:20px;outline:none;}";
+        html += "button{background:#007bff;color:white;border:none;padding:10px 15px;border-radius:20px;}";
+        html += "</style></head><body><div id='chat'></div><div id='bar'>";
+        html += "<div id='cam' style='cursor:pointer;font-size:24px'>📷</div>";
+        html += "<input type='file' id='fIn' accept='image/*' style='display:none'>";
+        html += "<input type='text' id='mIn' placeholder='Message...'>";
+        html += "<button onclick='send()'>OK</button></div><script>";
         
         html += "const myNick = '" + my_nick + "';";
         
-        html += R"(async function load() {
-                const r = await fetch('/get_messages');
-                const msgs = await r.json();
-                const chat = document.getElementById('chat');
-                const isBottom = chat.scrollTop + chat.offsetHeight >= chat.scrollHeight - 50;
-                chat.innerHTML = '';
-                msgs.forEach(m => {
-                    let c = m.text;
-                    if(c.startsWith('img:')) c = `<img src="data:image/png;base64,${c.substring(4)}" onclick="window.open(this.src)">`;
-                    const isMe = m.sender === myNick ? 'me' : '';
-                    chat.innerHTML += `<div class="msg ${isMe}"><b>${m.sender}</b><br>${c}</div>`;
-                });
-                if(isBottom) chat.scrollTop = chat.scrollHeight;
-            }
-            async function send() {
-                const i = document.getElementById('mIn');
-                if(!i.value) return;
-                const v = i.value; i.value = '';
-                await fetch('/send', { method: 'POST', body: v });
-                load();
-            }
-            document.getElementById('cam').onclick = () => document.getElementById('fIn').click();
-            document.getElementById('fIn').onchange = (e) => {
-                const f = e.target.files[0];
-                const rd = new FileReader();
-                rd.onload = async () => {
-                    const b = rd.result.split(',')[1];
-                    await fetch('/send', { method: 'POST', body: 'img:' + b });
-                };
-                rd.readAsDataURL(f);
-            };
-            setInterval(load, 2500); load();
-        </script></body></html>)";
+        html += "async function load(){";
+        html += "const r=await fetch('/get_messages');const msgs=await r.json();";
+        html += "const chat=document.getElementById('chat');const isBot=chat.scrollTop+chat.offsetHeight>=chat.scrollHeight-50;";
+        html += "chat.innerHTML='';msgs.forEach(m=>{";
+        html += "let c=m.text;if(c.startsWith('img:')) c='<img src=\"data:image/png;base64,'+c.substring(4)+'\" onclick=\"window.open(this.src)\">';";
+        html += "const isMe=m.sender===myNick?'me':'';";
+        html += "chat.innerHTML+='<div class=\"msg '+isMe+'\"><b>'+m.sender+'</b><br>'+c+'</div>';";
+        html += "});if(isBot)chat.scrollTop=chat.scrollHeight;}";
+        
+        html += "async function send(){const i=document.getElementById('mIn');if(!i.value)return;const v=i.value;i.value='';await fetch('/send',{method:'POST',body:v});load();}";
+        
+        html += "document.getElementById('cam').onclick=()=>document.getElementById('fIn').click();";
+        html += "document.getElementById('fIn').onchange=(e)=>{const f=e.target.files[0];const rd=new FileReader();rd.onload=async()=>{";
+        html += "const b=rd.result.split(',')[1];await fetch('/send',{method:'POST',body:'img:'+b});};rd.readAsDataURL(f);};";
+        html += "setInterval(load,2500);load();</script></body></html>";
+        
         res.set_content(html, "text/html; charset=utf-8");
     });
 
