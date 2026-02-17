@@ -9,22 +9,18 @@ N='\e[0m'
 VER_FILE="$HOME/.fntm/version.txt"
 RAW_CPP_URL="https://raw.githubusercontent.com/itoryon/meow/main/chat.cpp"
 mkdir -p ~/.fntm && touch ~/.fntm/version.txt
-echo -e "${G}[*] Проверка обновлений meoww...${N}"
 
-# 1. Проверка свободного места
-FREE_KB=$(df /data | awk 'NR==2 {print $4}')
-FREE_MB=$((FREE_KB / 1024))
+echo -e "${G}[*] Проверка обновлений meoww Web...${N}"
 
+# 1. Проверка места
+FREE_MB=$(df /data | awk 'NR==2 {print int($4 / 1024)}')
 if [ "$FREE_MB" -lt 100 ]; then
     echo -e "${R}[!] Мало места: $FREE_MB MB. Нужно 100 MB!${N}"
     exit 1
 fi
 
-# 2. Локальная версия
+# 2. Версии
 [ -f "$VER_FILE" ] && LOCAL_VER=$(cat "$VER_FILE") || LOCAL_VER="0.0"
-
-# 3. Версия с GitHub
-echo -e "${B}[*] Запрос версии с GitHub...${N}"
 REMOTE_VER=$(curl -sL "$RAW_CPP_URL" | head -n 50 | grep "VERSION =" | cut -d'"' -f2)
 
 if [ -z "$REMOTE_VER" ]; then
@@ -32,38 +28,36 @@ if [ -z "$REMOTE_VER" ]; then
     exit 1
 fi
 
-# 4. Логика выбора действия
 DO_INSTALL=false
-
 if [ "$LOCAL_VER" == "$REMOTE_VER" ] && [ -f ~/meoww ]; then
-    echo -e "${G}[+] У вас актуальная версия ($LOCAL_VER).${N}"
-    read -p "Хотите переустановить текущую версию? (y/N): " reconf
+    echo -e "${G}[+] Актуальная версия ($LOCAL_VER).${N}"
+    read -p "Переустановить? (y/N): " reconf
     [[ $reconf =~ ^[Yy]$ ]] && DO_INSTALL=true
 else
-    echo -e "${Y}[!] Доступна новая версия: $LOCAL_VER -> $REMOTE_VER${N}"
-    read -p "Установить обновление? (Y/n): " conf
+    echo -e "${Y}[!] Новая версия: $LOCAL_VER -> $REMOTE_VER${N}"
+    read -p "Обновить? (Y/n): " conf
     [[ ! $conf =~ ^[Nn]$ ]] && DO_INSTALL=true
 fi
 
-# 5. Процесс установки
+# 3. Компиляция
 if [ "$DO_INSTALL" = true ]; then
-    echo -e "${B}[*] Скачивание и компиляция v$REMOTE_VER...${N}"
+    echo -e "${B}[*] Сборка v$REMOTE_VER (Web Interface)...${N}"
     curl -L "$RAW_CPP_URL" -o "chat.cpp"
 
-    if clang++ -O3 chat.cpp -lcurl -lncurses -lcrypto -lpthread -o ~/meoww; then
+    # ВАЖНО: новая команда компиляции без ncurses
+    if clang++ -O3 chat.cpp -lcurl -lssl -lcrypto -lpthread -o ~/meoww; then
         echo "$REMOTE_VER" > "$VER_FILE"
-        echo -e "${G}[OK] Готово! Версия v$REMOTE_VER установлена.${N}"
-        mkdir -p ~/.shortcuts && printf '#!/data/data/com.termux/files/usr/bin/bash\nexport TERM=xterm-256color\ntermux-wake-lock\nreset\n~/meoww\n' > ~/.shortcuts/chat && chmod +x ~/.shortcuts/chat
+        echo -e "${G}[OK] Успешно! Откройте http://localhost:8080 после запуска.${N}"
+        
+        # Обновляем ярлык (убираем reset, добавляем уведомление)
+        printf '#!/data/data/com.termux/files/usr/bin/bash\ntermux-wake-lock\necho "Сервер запущен на http://localhost:8080"\n~/meoww\n' > ~/.shortcuts/chat && chmod +x ~/.shortcuts/chat
+        
         pkill -f "meoww" || true
-
         rm chat.cpp
     else
-        echo -e "${R}[-] Ошибка сборки!${N}"
+        echo -e "${R}[-] Ошибка компиляции! Проверьте наличие httplib.h${N}"
         exit 1
     fi
 else
-    echo -e "${B}[*] Выход без изменений.${N}"
+    echo -e "${B}[*] Выход.${N}"
 fi
-
-exit 0
-
