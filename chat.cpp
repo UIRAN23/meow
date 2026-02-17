@@ -22,7 +22,6 @@ using json = nlohmann::json;
 
 string VERSION = "5.0"; 
 
-// --- НАСТРОЙКИ ---
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
@@ -38,9 +37,7 @@ string aes_256(string text, string pass, bool enc) {
     SHA256((unsigned char*)pass.c_str(), pass.length(), key);
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     int len, flen; 
-    // Буфер 4MB для Base64 фото
-    unsigned char* out = new unsigned char[1024*1024*4]; 
-    
+    unsigned char* out = new unsigned char[text.length() + 1024 * 1024 * 2]; 
     if(enc) {
         EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
         EVP_EncryptUpdate(ctx, out, &len, (unsigned char*)text.c_str(), text.length());
@@ -49,18 +46,13 @@ string aes_256(string text, string pass, bool enc) {
         EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
         EVP_DecryptUpdate(ctx, out, &len, (unsigned char*)text.c_str(), text.length());
         if(EVP_DecryptFinal_ex(ctx, out + len, &flen) <= 0) { 
-            EVP_CIPHER_CTX_free(ctx); 
-            delete[] out;
-            return "ERR_DECRYPT"; 
+            EVP_CIPHER_CTX_free(ctx); delete[] out; return "ERR_DECRYPT"; 
         }
     }
-    string result((char*)out, len + flen);
-    EVP_CIPHER_CTX_free(ctx);
-    delete[] out;
-    return result;
+    string res((char*)out, len + flen);
+    EVP_CIPHER_CTX_free(ctx); delete[] out; return res;
 }
 
-// --- ВСПОМОГАТЕЛЬНЫЕ ---
 string from_z(string in) {
     string res = "";
     for (size_t i = 0; i < in.length(); ) {
@@ -131,90 +123,67 @@ void update_loop() {
 }
 
 int main() {
-    setlocale(LC_ALL, "");
     cfg = string(getenv("HOME")) + "/.fntm/config.dat";
     ifstream fi(cfg);
     if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
-    else { cout << "Run console version first to configure!" << endl; return 1; }
+    else { cout << "Error: config not found!" << endl; return 1; }
 
     thread(update_loop).detach();
-
     httplib::Server svr;
 
     svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-        string html = R"(
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <title>Meoww Web</title>
-            <style>
-                body { font-family: sans-serif; background: #0a0a0a; color: #fff; margin: 0; display: flex; flex-direction: column; height: 100vh; }
-                #chat { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-                .msg { background: #1e1e1e; padding: 10px; border-radius: 15px; max-width: 85%; align-self: flex-start; line-height: 1.4; }
-                .msg.me { align-self: flex-end; background: #0056b3; }
-                .msg b { color: #888; font-size: 0.75em; display: block; margin-bottom: 3px; }
-                .msg img { max-width: 100%; border-radius: 10px; margin-top: 5px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-                #bar { background: #111; padding: 12px; display: flex; gap: 10px; align-items: center; border-top: 1px solid #222; }
-                input[type="text"] { flex: 1; background: #222; border: none; color: #fff; padding: 12px; border-radius: 25px; outline: none; }
-                #cam { font-size: 24px; cursor: pointer; }
-                button { background: #007bff; color: #fff; border: none; padding: 10px 20px; border-radius: 25px; font-weight: bold; }
-            </style>
-        </head>
-        <body>
-            <div id="chat"></div>
-            <div id="bar">
-                <div id="cam">📷</div>
-                <input type="file" id="fIn" accept="image/*" style="display:none">
-                <input type="text" id="mIn" placeholder="Сообщение...">
-                <button onclick="send()">></button>
-            </div>
-            <script>
-                const nick = ")"; + my_nick + R"(";
-                async function load() {
-                    try {
-                        const r = await fetch('/get_messages');
-                        const msgs = await r.json();
-                        const chat = document.getElementById('chat');
-                        const isBottom = chat.scrollTop + chat.offsetHeight >= chat.scrollHeight - 60;
-                        chat.innerHTML = '';
-                        msgs.forEach(m => {
-                            let text = m.text;
-                            if(text.startsWith('img:')) {
-                                text = `<img src="data:image/png;base64,${text.substring(4)}" onclick="window.open(this.src)">`;
-                            }
-                            const isMe = m.sender === nick ? 'me' : '';
-                            chat.innerHTML += `<div class="msg ${isMe}"><b>${m.sender}</b>${text}</div>`;
-                        });
-                        if(isBottom) chat.scrollTop = chat.scrollHeight;
-                    } catch(e) {}
-                }
-                async function send() {
-                    const i = document.getElementById('mIn');
-                    if(!i.value) return;
-                    const val = i.value; i.value = '';
-                    await fetch('/send', { method: 'POST', body: val });
-                    load();
-                }
-                document.getElementById('cam').onclick = () => document.getElementById('fIn').click();
-                document.getElementById('fIn').onchange = (e) => {
-                    const file = e.target.files[0];
-                    if(!file) return;
-                    const reader = new FileReader();
-                    reader.onload = async () => {
-                        const b64 = reader.result.split(',')[1];
-                        await fetch('/send', { method: 'POST', body: 'img:' + b64 });
-                    };
-                    reader.readAsDataURL(file);
-                };
-                document.getElementById('mIn').onkeypress = (e) => { if(e.key==='Enter') send(); };
-                setInterval(load, 2500);
+        // Разрезали R-строку, чтобы безопасно вставить my_nick
+        string html = R"(<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
+            body { font-family: sans-serif; background: #000; color: #eee; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+            #chat { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 10px; }
+            .msg { background: #222; padding: 10px; border-radius: 12px; max-width: 85%; align-self: flex-start; }
+            .msg.me { align-self: flex-end; background: #007bff; }
+            .msg img { max-width: 100%; border-radius: 8px; display: block; margin-top: 5px; }
+            #bar { background: #111; padding: 10px; display: flex; gap: 10px; border-top: 1px solid #333; }
+            input[type="text"] { flex: 1; background: #222; border: none; color: white; padding: 12px; border-radius: 20px; outline: none; }
+            button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 20px; }
+        </style></head><body><div id="chat"></div><div id="bar">
+            <div id="cam" style="cursor:pointer;font-size:24px">📷</div>
+            <input type="file" id="fIn" accept="image/*" style="display:none">
+            <input type="text" id="mIn" placeholder="Сообщение...">
+            <button onclick="send()">></button>
+        </div><script>)";
+        
+        html += "const myNick = '" + my_nick + "';";
+        
+        html += R"(async function load() {
+                const r = await fetch('/get_messages');
+                const msgs = await r.json();
+                const chat = document.getElementById('chat');
+                const isBottom = chat.scrollTop + chat.offsetHeight >= chat.scrollHeight - 50;
+                chat.innerHTML = '';
+                msgs.forEach(m => {
+                    let c = m.text;
+                    if(c.startsWith('img:')) c = `<img src="data:image/png;base64,${c.substring(4)}" onclick="window.open(this.src)">`;
+                    const isMe = m.sender === myNick ? 'me' : '';
+                    chat.innerHTML += `<div class="msg ${isMe}"><b>${m.sender}</b><br>${c}</div>`;
+                });
+                if(isBottom) chat.scrollTop = chat.scrollHeight;
+            }
+            async function send() {
+                const i = document.getElementById('mIn');
+                if(!i.value) return;
+                const v = i.value; i.value = '';
+                await fetch('/send', { method: 'POST', body: v });
                 load();
-            </script>
-        </body>
-        </html>
-        )";
+            }
+            document.getElementById('cam').onclick = () => document.getElementById('fIn').click();
+            document.getElementById('fIn').onchange = (e) => {
+                const f = e.target.files[0];
+                const rd = new FileReader();
+                rd.onload = async () => {
+                    const b = rd.result.split(',')[1];
+                    await fetch('/send', { method: 'POST', body: 'img:' + b });
+                };
+                rd.readAsDataURL(f);
+            };
+            setInterval(load, 2500); load();
+        </script></body></html>)";
         res.set_content(html, "text/html; charset=utf-8");
     });
 
@@ -223,9 +192,7 @@ int main() {
         lock_guard<mutex> l(mtx);
         for (auto& p : chat_history) {
             size_t pos = p.second.find("]: ");
-            if(pos != string::npos) {
-                j.push_back({{"sender", p.second.substr(1, pos - 1)}, {"text", p.second.substr(pos + 3)}});
-            }
+            if(pos != string::npos) j.push_back({{"sender", p.second.substr(1, pos - 1)}, {"text", p.second.substr(pos + 3)}});
         }
         res.set_content(j.dump(), "application/json");
     });
@@ -240,7 +207,7 @@ int main() {
         res.set_content("ok", "text/plain");
     });
 
-    cout << "Web Server: http://localhost:8080" << endl;
+    cout << "Server: http://localhost:8080" << endl;
     svr.listen("0.0.0.0", 8080);
     return 0;
 }
