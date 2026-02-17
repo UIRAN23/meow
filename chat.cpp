@@ -7,7 +7,6 @@
 #include <iomanip>
 #include <chrono>
 #include <sys/stat.h>
-#include <ncurses.h>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -16,42 +15,27 @@
 #include <algorithm>
 #include <set>
 #include <unistd.h>
+#include "httplib.h"
 
 using namespace std;
 using json = nlohmann::json;
 
-const string VERSION = "4_r";
+// --- НАСТРОЙКИ ---
 const string SB_URL = "https://ilszhdmqxsoixcefeoqa.supabase.co/rest/v1/messages";
 const string SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc";
 const int PUA_START = 0xE000;
 
 string my_pass, my_nick, my_room, cfg;
-WINDOW *chat_win, *input_win;
+vector<pair<string, string>> chat_history; 
+set<string> known_ids;
 mutex mtx;
 
-vector<pair<string, string>> chat_history; // {ID, Текст}
-set<string> known_ids; 
-int scroll_pos = 0;
-const int LOAD_STEP = 15;
-bool need_redraw = true;
-bool is_loading = false;
-
-// --- УВЕДОМЛЕНИЯ ---
-void notify(string author, string text) {
-    if (author == my_nick || author.empty()) return;
-    string clean_text = text;
-    replace(clean_text.begin(), clean_text.end(), '\'', ' ');
-    replace(clean_text.begin(), clean_text.end(), '\"', ' ');
-    string cmd = "termux-notification --title 'Чат: " + author + "' --content '" + clean_text + "' --id fntm_notif --priority high --sound";
-    system(cmd.c_str());
-}
-
-// --- КРИПТО ---
+// --- КРИПТО (ТВОЙ КОД) ---
 string aes_256(string text, string pass, bool enc) {
     unsigned char key[32], iv[16] = {0};
     SHA256((unsigned char*)pass.c_str(), pass.length(), key);
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    int len, flen; unsigned char out[8192];
+    int len, flen; unsigned char out[1024*1024*2]; // 2MB буфер для фото
     if(enc) {
         EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
         EVP_EncryptUpdate(ctx, out, &len, (unsigned char*)text.c_str(), text.length());
@@ -59,7 +43,7 @@ string aes_256(string text, string pass, bool enc) {
     } else {
         EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, key, iv);
         EVP_DecryptUpdate(ctx, out, &len, (unsigned char*)text.c_str(), text.length());
-        if(EVP_DecryptFinal_ex(ctx, out + len, &flen) <= 0) { EVP_CIPHER_CTX_free(ctx); return "ERR"; }
+        if(EVP_DecryptFinal_ex(ctx, out + len, &flen) <= 0) { EVP_CIPHER_CTX_free(ctx); return "ERR_DECRYPT"; }
     }
     EVP_CIPHER_CTX_free(ctx);
     return string((char*)out, len + flen);
@@ -111,216 +95,141 @@ string request(string method, int limit, int offset, string body = "") {
     return resp;
 }
 
-// --- ВОРКЕР ---
-void background_worker() {
-    bool is_first_run = true;
-    long long max_seen_id = 0;
+// --- ФОНОВОЕ ОБНОВЛЕНИЕ ---
+void update_loop() {
     while(true) {
-        string res = request("GET", 10, 0);
-        if (!res.empty() && res[0] == '[') {
-            auto data = json::parse(res);
-            if (is_first_run) {
-                for (auto& item : data) {
-                    long long id = item.value("id", 0LL);
-                    known_ids.insert(to_string(id));
-                    if (id > max_seen_id) max_seen_id = id;
-                }
-                is_first_run = false;
-            } else {
-                for (int i = data.size()-1; i >= 0; i--) {
-                    long long cur_id = data[i].value("id", 0LL);
-                    string s_id = to_string(cur_id);
-                    if (known_ids.find(s_id) == known_ids.end()) {
-                        if (cur_id > max_seen_id) {
-                            string snd = data[i].value("sender", "");
-                            string msg = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
-                            notify(snd, msg);
-                            max_seen_id = cur_id;
-                        }
-                        known_ids.insert(s_id);
-                    }
-                }
-            }
-        }
-        sleep(5);
-    }
-}
-
-// --- ИНТЕРФЕЙС ---
-void redraw_chat() {
-    int my, mx; getmaxyx(chat_win, my, mx);
-    werase(chat_win);
-    lock_guard<mutex> l(mtx);
-    vector<string> wrapped;
-    for (const auto& p : chat_history) {
-        string msg = p.second;
-        string cur = ""; int w = 0;
-        for (size_t i = 0; i < msg.length(); ) {
-            int len = 1; unsigned char c = (unsigned char)msg[i];
-            if (c >= 0xf0) len = 4; else if (c >= 0xe0) len = 3; else if (c >= 0xc0) len = 2;
-            if (w + 1 > mx) { wrapped.push_back(cur); cur = ""; w = 0; }
-            cur += msg.substr(i, len); w++; i += len;
-        }
-        if (!cur.empty()) wrapped.push_back(cur);
-    }
-    int total = wrapped.size();
-    if (total > 0) {
-        if (scroll_pos >= total) scroll_pos = total - 1;
-        int end = total - 1 - scroll_pos;
-        int start = max(0, end - (my - 1));
-        for (int i = start, row = 0; i <= end && i < total; i++) mvwaddstr(chat_win, row++, 0, wrapped[i].c_str());
-    }
-    wrefresh(chat_win);
-}
-
-void load_older_messages_async() {
-    if (is_loading) return;
-    is_loading = true;
-    thread([](){
-        int offset;
-        { lock_guard<mutex> l(mtx); offset = chat_history.size(); }
-        string r = request("GET", LOAD_STEP, offset);
+        string r = request("GET", 20, 0);
         if (!r.empty() && r[0] == '[') {
             auto data = json::parse(r);
             lock_guard<mutex> l(mtx);
-            for (auto& item : data) {
-                string id = to_string(item.value("id", 0));
+            for (int i = data.size()-1; i >= 0; i--) {
+                string id = to_string(data[i].value("id", 0));
                 if (known_ids.find(id) == known_ids.end()) {
-                    string s = item.value("sender", "???"), p = from_z(item.value("payload", ""));
-                    string d = aes_256(p, my_pass, false);
-                    chat_history.insert(chat_history.begin(), {id, "[" + s + "]: " + d});
+                    string snd = data[i].value("sender", "");
+                    string payload = data[i].value("payload", "");
+                    string decoded = aes_256(from_z(payload), my_pass, false);
+                    chat_history.push_back({id, "[" + snd + "]: " + decoded});
                     known_ids.insert(id);
                 }
             }
-            need_redraw = true;
+            if(chat_history.size() > 50) chat_history.erase(chat_history.begin(), chat_history.begin() + 10);
         }
-        is_loading = false;
-    }).detach();
+        this_thread::sleep_for(chrono::seconds(3));
+    }
 }
 
-int main(int argc, char** argv) {
-    setlocale(LC_ALL, "");
+// --- MAIN ---
+int main() {
     cfg = string(getenv("HOME")) + "/.fntm/config.dat";
-
-    if (argc > 1 && string(argv[1]) == "--bg") {
-        ifstream fi(cfg);
-        if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
-        background_worker();
-        return 0;
-    }
-
     ifstream fi(cfg);
     if(fi) { getline(fi, my_nick); getline(fi, my_pass); getline(fi, my_room); }
+    else { cout << "Запусти консольную версию один раз для настройки!" << endl; return 1; }
 
-    // --- УМНАЯ ПРОВЕРКА ПРОЦЕССА БЕЗ ЗАПИСИ НА ДИСК ---
-    char path[1024];
-    ssize_t l = readlink("/proc/self/exe", path, sizeof(path)-1);
-    if (l != -1) {
-        path[l] = '\0';
-        string full_path = string(path);
-        string filename = full_path.substr(full_path.find_last_of("/\\") + 1);
+    thread(update_loop).detach();
 
-        // Команда для поиска процесса в памяти
-        string check_cmd = "ps aux | grep '" + filename + "' | grep '\\--bg' | grep -v grep";
-        FILE* pipe = popen(check_cmd.c_str(), "r");
-        bool already_running = false;
-        if (pipe) {
-            char buf[128];
-            if (fgets(buf, 128, pipe)) already_running = true;
-            pclose(pipe);
-        }
+    httplib::Server svr;
 
-        if (!already_running) {
-            string cmd = full_path + " --bg > /dev/null 2>&1 &";
-            system(cmd.c_str());
-        }
-    }
-
-    initscr(); cbreak(); noecho(); keypad(stdscr, TRUE); curs_set(1);
-
-    if (my_nick.empty()) {
-        echo();
-        mvprintw(0,0,"Nick: "); char n[32]; getstr(n); my_nick = n;
-        mvprintw(1,0,"Pass: "); char p[64]; getstr(p); my_pass = p;
-        mvprintw(2,0,"Room: "); char r[64]; getstr(r); my_room = r;
-        mkdir((string(getenv("HOME")) + "/.fntm").c_str(), 0700);
-        ofstream fo(cfg); fo << my_nick << endl << my_pass << endl << my_room;
-        noecho(); clear();
-    }
-
-    int my, mx; getmaxyx(stdscr, my, mx);
-    chat_win = newwin(my - 5, mx, 0, 0);
-    input_win = newwin(5, mx, my - 5, 0);
-    keypad(input_win, TRUE); nodelay(input_win, TRUE);
-
-    thread([](){
-        while(true) {
-            string r = request("GET", 15, 0); 
-            if (!r.empty() && r[0] == '[') {
-                auto data = json::parse(r);
-                bool upd = false;
-                lock_guard<mutex> l(mtx);
-                for (int i = data.size()-1; i >= 0; i--) {
-                    string id = to_string(data[i].value("id", 0));
-                    if (known_ids.find(id) == known_ids.end()) {
-                        string snd = data[i].value("sender", ""), d = aes_256(from_z(data[i].value("payload", "")), my_pass, false);
-                        chat_history.push_back({id, "[" + snd + "]: " + d});
-                        known_ids.insert(id);
-                        upd = true;
-                    }
+    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        string html = R"(
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Termux Web Chat</title>
+            <style>
+                body { font-family: -apple-system, sans-serif; background: #000; color: #eee; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+                #chat { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 10px; }
+                .msg { background: #222; padding: 10px; border-radius: 12px; max-width: 85%; align-self: flex-start; word-wrap: break-word; }
+                .msg.me { align-self: flex-end; background: #007bff; }
+                .msg b { color: #aaa; font-size: 0.8em; display: block; margin-bottom: 4px; }
+                .msg img { max-width: 100%; border-radius: 8px; display: block; margin-top: 5px; cursor: pointer; }
+                #input-bar { background: #111; padding: 10px; display: flex; gap: 10px; align-items: center; border-top: 1px solid #333; }
+                input[type="text"] { flex: 1; background: #222; border: none; color: white; padding: 12px; border-radius: 20px; outline: none; }
+                #file-btn { font-size: 20px; cursor: pointer; user-select: none; }
+                button#send-btn { background: #007bff; color: white; border: none; padding: 10px 18px; border-radius: 20px; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <div id="chat"></div>
+            <div id="input-bar">
+                <div id="file-btn">📷</div>
+                <input type="file" id="fileInput" accept="image/*" style="display:none">
+                <input type="text" id="msgInput" placeholder="Сообщение...">
+                <button id="send-btn" onclick="sendMsg()">></button>
+            </div>
+            <script>
+                const myNick = ")"; + my_nick + R"(";
+                async function load() {
+                    const r = await fetch('/get_messages');
+                    const msgs = await r.json();
+                    const chat = document.getElementById('chat');
+                    const shouldScroll = chat.scrollTop + chat.offsetHeight >= chat.scrollHeight - 50;
+                    chat.innerHTML = '';
+                    msgs.forEach(m => {
+                        let content = m.text;
+                        if(content.startsWith('img:')) {
+                            content = `<img src="data:image/png;base64,${content.substring(4)}" onclick="window.open(this.src)">`;
+                        }
+                        const isMe = m.sender === myNick ? 'me' : '';
+                        chat.innerHTML += `<div class="msg ${isMe}"><b>${m.sender}</b>${content}</div>`;
+                    });
+                    if(shouldScroll) chat.scrollTop = chat.scrollHeight;
                 }
-                // Быстрая очистка при просмотре свежих сообщений
-                if (scroll_pos == 0) {
-                    int del = 0;
-                    while (chat_history.size() > 20 && del < 4) {
-                        known_ids.erase(chat_history[0].first);
-                        chat_history.erase(chat_history.begin());
-                        del++; upd = true;
-                    }
+                async function sendMsg() {
+                    const input = document.getElementById('msgInput');
+                    const text = input.value;
+                    if(!text) return;
+                    input.value = '';
+                    await fetch('/send', { method: 'POST', body: text });
+                    load();
                 }
-                if (upd) need_redraw = true;
-            }
-            this_thread::sleep_for(chrono::seconds(3));
-        }
-    }).detach();
+                document.getElementById('file-btn').onclick = () => document.getElementById('fileInput').click();
+                document.getElementById('fileInput').onchange = async (e) => {
+                    const file = e.target.files[0];
+                    if(!file) return;
+                    const reader = new FileReader();
+                    reader.onload = async () => {
+                        const base64 = reader.result.split(',')[1];
+                        await fetch('/send', { method: 'POST', body: 'img:' + base64 });
+                    };
+                    reader.readAsDataURL(file);
+                };
+                document.getElementById('msgInput').onkeypress = (e) => { if(e.key === 'Enter') sendMsg(); };
+                setInterval(load, 2000);
+                load();
+            </script>
+        </body>
+        </html>
+        )";
+        res.set_content(html, "text/html");
+    });
 
-    string input_buf = "";
-    while(true) {
-        if (need_redraw) { redraw_chat(); need_redraw = false; }
-        werase(input_win); box(input_win, 0, 0);
-        mvwprintw(input_win, 1, 1, "[%s@%s] v%s", my_nick.c_str(), my_room.c_str(), VERSION.c_str());
-        mvwprintw(input_win, 2, 1, "> %s", input_buf.c_str());
-        wrefresh(input_win);
-
-        int ch = wgetch(input_win);
-        if (ch == ERR) { usleep(20000); continue; }
-
-        if (ch == KEY_UP) { 
-            scroll_pos++; need_redraw = true; 
-            if (scroll_pos + 5 > (int)chat_history.size()) load_older_messages_async(); 
-        }
-        else if (ch == KEY_DOWN) { if (scroll_pos > 0) { scroll_pos--; need_redraw = true; } }
-        else if (ch == '\n' || ch == 10 || ch == 13) {
-            if (!input_buf.empty()) {
-                string m = input_buf; input_buf = "";
-                thread([m](){
-                    string e = to_z(aes_256(m, my_pass, true));
-                    json j = {{"sender", my_nick}, {"payload", e}, {"chat_key", my_room}};
-                    request("POST", 0, 0, j.dump());
-                }).detach();
-                scroll_pos = 0; need_redraw = true;
-            } else {
-                endwin(); exit(0); // Тихий выход
+    svr.Get("/get_messages", [](const httplib::Request&, httplib::Response& res) {
+        json j = json::array();
+        lock_guard<mutex> l(mtx);
+        for (auto& p : chat_history) {
+            size_t pos = p.second.find("]: ");
+            if(pos != string::npos) {
+                string s = p.second.substr(1, pos - 1);
+                string t = p.second.substr(pos + 3);
+                j.push_back({{"sender", s}, {"text", t}});
             }
         }
-        else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (!input_buf.empty()) {
-                size_t pos = input_buf.length() - 1;
-                while (pos > 0 && (input_buf[pos] & 0xC0) == 0x80) pos--;
-                input_buf.erase(pos);
-            }
-        }
-        else if (ch >= 32 && ch < 10000) { input_buf += (char)ch; }
-    }
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/send", [](const httplib::Request& req, httplib::Response& res) {
+        string msg = req.body;
+        thread([msg](){
+            string encrypted = to_z(aes_256(msg, my_pass, true));
+            json j = {{"sender", my_nick}, {"payload", encrypted}, {"chat_key", my_room}};
+            request("POST", 0, 0, j.dump());
+        }).detach();
+        res.set_content("ok", "text/plain");
+    });
+
+    cout << "Server started at http://localhost:8080" << endl;
+    svr.listen("0.0.0.0", 8080);
     return 0;
 }
