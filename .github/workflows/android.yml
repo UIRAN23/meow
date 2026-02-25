@@ -22,18 +22,16 @@ jobs:
 
       - name: Init Go Module
         run: |
-          # Если файла go.mod нет, создаем его, чтобы Go не ругался
           if [ ! -f "go.mod" ]; then
             go mod init meow_chat
           fi
           go mod tidy
 
-      - name: Install Fyne CLI (Correct Tool)
+      - name: Install Fyne CLI
         run: go install fyne.io/tools/cmd/fyne@latest
 
       - name: Create Icon
         run: |
-          # Создаем иконку, если её нет (обязательно для APK)
           if [ ! -f "Icon.png" ]; then
             convert -size 512x512 xc:black -fill white -gravity center -pointsize 200 -draw "text 0,0 'M'" Icon.png
           fi
@@ -41,8 +39,8 @@ jobs:
       - name: Build APK
         run: |
           export PATH=$PATH:$(go env GOPATH)/bin
-          # Собираем пакет. Теперь go.mod и Icon.png точно на месте.
-          fyne package -os android -appID com.itoryon.meow
+          # Использование новых флагов: --target вместо -os, --app-id вместо -appID
+          fyne package --target android --app-id com.itoryon.meow --icon Icon.png
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
