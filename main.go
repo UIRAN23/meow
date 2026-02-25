@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/color"
 	"image/jpeg"
 	_ "image/png"
 	"io"
@@ -56,7 +55,7 @@ func decrypt(cryptoText, key string) string {
 	if len(ciphertext) < aes.BlockSize { return "[Зашифровано]" }
 	block, _ := aes.NewCipher(fixedKey)
 	iv := ciphertext[:aes.BlockSize]; ciphertext = ciphertext[aes.BlockSize:]
-	stream := cipher.NewDecrypter(block, iv)
+	stream := cipher.NewCFBDecrypter(block, iv) // ИСПРАВЛЕНО
 	stream.XORKeyStream(ciphertext, ciphertext)
 	return string(ciphertext)
 }
@@ -66,7 +65,7 @@ func encrypt(text, key string) string {
 	block, _ := aes.NewCipher(fixedKey)
 	ciphertext := make([]byte, aes.BlockSize+len(text))
 	iv := ciphertext[:aes.BlockSize]; io.ReadFull(rand.Reader, iv)
-	stream := cipher.NewEncrypter(block, iv)
+	stream := cipher.NewCFBEncrypter(block, iv) // ИСПРАВЛЕНО
 	stream.XORKeyStream(ciphertext[aes.BlockSize:], []byte(text))
 	return base64.StdEncoding.EncodeToString(ciphertext)
 }
@@ -135,7 +134,6 @@ func main() {
 						widget.NewButton("", func() { showUserProfile(window, m.Sender, m.SenderAvatar) }),
 					)
 
-					// Исправленный способ задания цвета в RichText
 					nameSeg := &widget.TextSegment{Text: m.Sender + "\n", Style: widget.RichTextStyleStrong}
 					textSeg := &widget.TextSegment{Text: txt, Style: widget.RichTextStyleParagraph}
 					
