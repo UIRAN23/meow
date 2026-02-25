@@ -22,11 +22,9 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
-
 
 const (
 	supabaseURL = "https://ilszhdmqxsoixcefeoqa.supabase.co"
@@ -58,7 +56,7 @@ func decrypt(cryptoText, key string) string {
 	if len(ciphertext) < aes.BlockSize { return "[Зашифровано]" }
 	block, _ := aes.NewCipher(fixedKey)
 	iv := ciphertext[:aes.BlockSize]; ciphertext = ciphertext[aes.BlockSize:]
-	stream := cipher.NewCFBDecrypter(block, iv)
+	stream := cipher.NewDecrypter(block, iv)
 	stream.XORKeyStream(ciphertext, ciphertext)
 	return string(ciphertext)
 }
@@ -68,12 +66,11 @@ func encrypt(text, key string) string {
 	block, _ := aes.NewCipher(fixedKey)
 	ciphertext := make([]byte, aes.BlockSize+len(text))
 	iv := ciphertext[:aes.BlockSize]; io.ReadFull(rand.Reader, iv)
-	stream := cipher.NewCFBEncrypter(block, iv)
+	stream := cipher.NewEncrypter(block, iv)
 	stream.XORKeyStream(ciphertext[aes.BlockSize:], []byte(text))
 	return base64.StdEncoding.EncodeToString(ciphertext)
 }
 
-// Создание объекта картинки
 func getAvatarObj(base64Str string, size float32) fyne.CanvasObject {
 	var img *canvas.Image
 	if base64Str != "" {
@@ -87,19 +84,14 @@ func getAvatarObj(base64Str string, size float32) fyne.CanvasObject {
 	return img
 }
 
-// --- ОКНО ПРОФИЛЯ (TELEGRAM STYLE) ---
 func showUserProfile(win fyne.Window, name string, avatarStr string) {
 	largeAvatar := getAvatarObj(avatarStr, 250)
-	nameLabel := widget.NewLabelWithStyle(name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	nameLabel.Importance = widget.HighImportance
-
 	profileCard := container.NewVBox(
 		container.NewCenter(largeAvatar),
-		nameLabel,
+		widget.NewLabelWithStyle(name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Пользователь Meow Messenger", fyne.TextAlignCenter, fyne.TextStyle{Italic: true}),
 	)
-
 	dialog.ShowCustom("Профиль", "Закрыть", profileCard, win)
 }
 
@@ -138,26 +130,18 @@ func main() {
 					m := msgs[i]
 					txt := decrypt(m.Payload, currentPass)
 
-					// Аватарка-кнопка
-					avatarBtn := widget.NewButton("", func() {
-						showUserProfile(window, m.Sender, m.SenderAvatar)
-					})
-					// Накладываем картинку под невидимую кнопку
-					avatarView := container.NewStack(getAvatarObj(m.SenderAvatar, 45), avatarBtn)
-
-					row := container.NewHBox(
-						avatarView,
-						widget.NewRichText(
-							&widget.TextSegment{
-								Text:  m.Sender + "\n",
-								Style: widget.RichTextStyle{Color: color.NRGBA{100, 200, 255, 255}, TextStyle: fyne.TextStyle{Bold: true}},
-							},
-							&widget.TextSegment{
-								Text:  txt,
-								Style: widget.RichTextStyle{Color: color.White},
-							},
-						),
+					avatarView := container.NewStack(
+						getAvatarObj(m.SenderAvatar, 45),
+						widget.NewButton("", func() { showUserProfile(window, m.Sender, m.SenderAvatar) }),
 					)
+
+					// Исправленный способ задания цвета в RichText
+					nameSeg := &widget.TextSegment{Text: m.Sender + "\n", Style: widget.RichTextStyleStrong}
+					textSeg := &widget.TextSegment{Text: txt, Style: widget.RichTextStyleParagraph}
+					
+					rt := widget.NewRichText(nameSeg, textSeg)
+					
+					row := container.NewHBox(avatarView, rt)
 					messageBox.Add(row)
 				}
 				chatScroll.ScrollToBottom()
@@ -166,7 +150,7 @@ func main() {
 		}
 	}()
 
-	// --- ИНТЕРФЕЙС МЕНЮ ---
+	// --- ИНТЕРФЕЙС ---
 	sidebar := container.NewVBox()
 	sidebarScroll := container.NewVScroll(sidebar)
 	chatContent := container.NewBorder(nil, container.NewBorder(nil, nil, nil, widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
@@ -190,13 +174,10 @@ func main() {
 	var refreshSidebar func()
 	refreshSidebar = func() {
 		sidebar.Objects = nil
-		sidebar.Add(widget.NewLabelWithStyle("МОЙ ПРОФИЛЬ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
-		
-		// Клик по своей аватарке тоже открывает профиль
-		myAvaBtn := widget.NewButton("", func() {
+		sidebar.Add(widget.NewLabelWithStyle("ПРОФИЛЬ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
+		sidebar.Add(container.NewCenter(container.NewStack(cachedMenuAvatar, widget.NewButton("", func() {
 			showUserProfile(window, prefs.StringWithFallback("nickname", "User"), prefs.String("avatar_base64"))
-		})
-		sidebar.Add(container.NewCenter(container.NewStack(cachedMenuAvatar, myAvaBtn)))
+		}))))
 
 		nickEntry := widget.NewEntry(); nickEntry.SetText(prefs.StringWithFallback("nickname", "User"))
 		sidebar.Add(nickEntry)
@@ -226,9 +207,9 @@ func main() {
 			})
 			sidebar.Add(container.NewBorder(nil, nil, nil, del, btn))
 		}
-		sidebar.Add(widget.NewButtonWithIcon("Добавить чат", theme.ContentAddIcon(), func() {
+		sidebar.Add(widget.NewButtonWithIcon("Добавить", theme.ContentAddIcon(), func() {
 			rid, rps := widget.NewEntry(), widget.NewPasswordEntry()
-			dialog.ShowForm("Новый чат", "ОК", "Отмена", []*widget.FormItem{{Text: "ID", Widget: rid}, {Text: "Pass", Widget: rps}}, func(b bool) {
+			dialog.ShowForm("Чат", "ОК", "Отмена", []*widget.FormItem{{Text: "ID", Widget: rid}, {Text: "Pass", Widget: rps}}, func(b bool) {
 				if b { 
 					cl := prefs.String("chat_list")
 					if cl == "" { prefs.SetString("chat_list", rid.Text+":"+rps.Text) } else { prefs.SetString("chat_list", cl+","+rid.Text+":"+rps.Text) }
