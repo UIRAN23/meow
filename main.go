@@ -21,6 +21,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// --- НАСТРОЙКИ SUPABASE ---
 const (
 	supabaseURL = "https://ilszhdmqxsoixcefeoqa.supabase.co"
 	supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc"
@@ -32,7 +33,7 @@ type Message struct {
 	Payload string `json:"payload"`
 }
 
-// Функции шифрования вынесены отдельно для чистоты
+// --- ШИФРОВАНИЕ ---
 func encrypt(text, key string) string {
 	fixedKey := make([]byte, 32)
 	copy(fixedKey, key)
@@ -60,24 +61,27 @@ func decrypt(cryptoText, key string) string {
 	return string(ciphertext)
 }
 
+// --- ПРИЛОЖЕНИЕ ---
 func main() {
-	myApp := app.NewWithID("com.itoryon.meow.v2")
+	// ID приложения важен для сохранения Preferences
+	myApp := app.NewWithID("com.itoryon.meow.messenger")
 	window := myApp.NewWindow("Meow Messenger")
-	window.Resize(fyne.NewSize(400, 700))
+	window.Resize(fyne.NewSize(450, 700))
 
 	prefs := myApp.Preferences()
 	var currentRoom string
 	var currentPass string
 	var messageCache []Message
 
+	// Виджеты чата
 	chatLog := widget.NewMultiLineEntry()
 	chatLog.Disable()
 	chatScroll := container.NewVScroll(chatLog)
 	msgInput := widget.NewEntry()
-	msgInput.SetPlaceHolder("Сообщение...")
-	titleLabel := widget.NewLabel("Выберите чат")
+	msgInput.SetPlaceHolder("Напишите что-нибудь...")
+	titleLabel := widget.NewLabel("Выберите чат из меню")
 
-	// Логика обновления сообщений
+	// Фоновый цикл обновления сообщений
 	go func() {
 		for {
 			if currentRoom == "" {
@@ -111,55 +115,60 @@ func main() {
 	}()
 
 	sidebar := container.NewVBox()
-	
-	// Обновление списка чатов
+
+	// Функция перерисовки бокового меню
 	var refreshSidebar func()
 	refreshSidebar = func() {
 		sidebar.Objects = nil
-		sidebar.Add(widget.NewLabelWithStyle("Meow Профиль", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
-		
+		sidebar.Add(widget.NewLabelWithStyle("Ваш Профиль", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
+
 		nickEntry := widget.NewEntry()
-		nickEntry.SetText(prefs.StringWithFallback("nickname", "Аноним"))
+		nickEntry.SetText(prefs.StringWithFallback("nickname", "User"))
 		sidebar.Add(nickEntry)
-		sidebar.Add(widget.NewButton("Сохранить ник", func() {
+		sidebar.Add(widget.NewButton("Обновить ник", func() {
 			prefs.SetString("nickname", nickEntry.Text)
 		}))
-		
+
 		sidebar.Add(widget.NewSeparator())
-		sidebar.Add(widget.NewLabel("Мои чаты:"))
+		sidebar.Add(widget.NewLabel("Чаты:"))
 
 		saved := prefs.StringWithFallback("chat_list", "")
 		if saved != "" {
 			for _, s := range strings.Split(saved, ",") {
 				if s == "" { continue }
 				parts := strings.Split(s, ":")
+				if len(parts) < 2 { continue }
+				
 				roomName := parts[0]
 				passVal := parts[1]
-				sidebar.Add(widget.NewButtonWithIcon(theme.MailAttachmentIcon(), roomName, func() {
+
+				// ИСПРАВЛЕНО: Сначала текст (roomName), потом иконка
+				sidebar.Add(widget.NewButtonWithIcon(roomName, theme.MailAttachmentIcon(), func() {
 					currentRoom = roomName
 					currentPass = passVal
-					titleLabel.SetText("Чат: " + roomName)
-					chatLog.SetText("Загрузка...")
+					titleLabel.SetText("Комната: " + roomName)
+					chatLog.SetText("Загрузка истории...")
 				}))
 			}
 		}
 	}
 
-	addChatBtn := widget.NewButtonWithIcon("Добавить чат", theme.ContentAddIcon(), func() {
+	// Кнопка добавления нового чата
+	addChatBtn := widget.NewButtonWithIcon("Новый чат", theme.ContentAddIcon(), func() {
 		rEntry := widget.NewEntry()
 		pEntry := widget.NewPasswordEntry()
 		items := []*widget.FormItem{
-			{Text: "ID комнаты", Widget: rEntry},
+			{Text: "ID чата", Widget: rEntry},
 			{Text: "Пароль", Widget: pEntry},
 		}
-		dialog.ShowForm("Новый чат", "ОК", "Отмена", items, func(b bool) {
+		dialog.ShowForm("Добавить комнату", "Добавить", "Отмена", items, func(b bool) {
 			if b && rEntry.Text != "" && pEntry.Text != "" {
 				old := prefs.StringWithFallback("chat_list", "")
-				newEntry := rEntry.Text + ":" + pEntry.Text
+				newChat := rEntry.Text + ":" + pEntry.Text
 				if old == "" {
-					prefs.SetString("chat_list", newEntry)
+					prefs.SetString("chat_list", newChat)
 				} else {
-					prefs.SetString("chat_list", old+","+newEntry)
+					prefs.SetString("chat_list", old+","+newChat)
 				}
 				refreshSidebar()
 			}
@@ -167,14 +176,17 @@ func main() {
 	})
 
 	refreshSidebar()
-	
+
+	// Логика отправки
 	sendMsg := func() {
-		if msgInput.Text == "" || currentRoom == "" { return }
+		if msgInput.Text == "" || currentRoom == "" {
+			return
+		}
 		text := msgInput.Text
 		msgInput.SetText("")
 		go func() {
 			msg := Message{
-				Sender:  prefs.StringWithFallback("nickname", "Аноним"),
+				Sender:  prefs.StringWithFallback("nickname", "User"),
 				ChatKey: currentRoom,
 				Payload: encrypt(text, currentPass),
 			}
@@ -196,11 +208,13 @@ func main() {
 	// Сборка интерфейса
 	topBar := container.NewHBox(titleLabel)
 	bottomBar := container.NewBorder(nil, nil, nil, widget.NewButtonWithIcon("", theme.MailSendIcon(), sendMsg), msgInput)
-	chatContent := container.NewBorder(topBar, bottomBar, nil, nil, chatScroll)
+	chatArea := container.NewBorder(topBar, bottomBar, nil, nil, chatScroll)
+
+	sideContent := container.NewVScroll(container.NewVBox(sidebar, widget.NewSeparator(), addChatBtn))
 	
-	sidebarContainer := container.NewVScroll(container.NewVBox(sidebar, widget.NewSeparator(), addChatBtn))
-	split := container.NewHSplit(sidebarContainer, chatContent)
-	split.Offset = 0.35
+	// Разделитель: меню слева, чат справа
+	split := container.NewHSplit(sideContent, chatArea)
+	split.Offset = 0.3 // Меню занимает 30% экрана
 
 	window.SetContent(split)
 	window.ShowAndRun()
