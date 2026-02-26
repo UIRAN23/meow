@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -38,26 +39,20 @@ type Message struct {
 	SenderAvatar string `json:"sender_avatar"`
 }
 
-// Ультра-легкое AES-CTR шифрование
 func fastCrypt(text, key string, decrypt bool) string {
 	if len(text) < 16 && decrypt { return text }
-	
-	// Генерируем ключ 32 байта (AES-256)
 	hashedKey := make([]byte, 32)
 	copy(hashedKey, key)
-
 	block, _ := aes.NewCipher(hashedKey)
-	
 	if decrypt {
 		data, _ := base64.StdEncoding.DecodeString(text)
+		if len(data) < aes.BlockSize { return text }
 		iv := data[:aes.BlockSize]
 		ciphertext := data[aes.BlockSize:]
 		stream := cipher.NewCTR(block, iv)
 		stream.XORKeyStream(ciphertext, ciphertext)
 		return string(ciphertext)
 	}
-
-	// Шифрование
 	ciphertext := make([]byte, aes.BlockSize+len(text))
 	iv := ciphertext[:aes.BlockSize]
 	io.ReadFull(rand.Reader, iv)
@@ -67,8 +62,8 @@ func fastCrypt(text, key string, decrypt bool) string {
 }
 
 func main() {
-	myApp := app.NewWithID("com.itoryon.imperor.v33")
-	window := myApp.NewWindow("Imperor Secure")
+	myApp := app.NewWithID("com.itoryon.imperor.v34")
+	window := myApp.NewWindow("Imperor UI")
 	window.Resize(fyne.NewSize(450, 700))
 
 	prefs := myApp.Preferences()
@@ -78,9 +73,10 @@ func main() {
 	chatBox := container.NewVBox()
 	chatScroll := container.NewVScroll(chatBox)
 
+	// Показ большой аватарки
 	viewAvatar := func(pathData string) {
 		if !strings.HasPrefix(pathData, "data:image") {
-			dialog.ShowInformation("Инфо", "Нет фото", window)
+			dialog.ShowInformation("Инфо", "Аватар отсутствует", window)
 			return
 		}
 		pts := strings.Split(pathData, ",")
@@ -88,14 +84,14 @@ func main() {
 		img, _, _ := image.Decode(bytes.NewReader(raw))
 		view := canvas.NewImageFromImage(img)
 		view.FillMode = canvas.ImageFillContain
-		view.SetMinSize(fyne.NewSize(300, 300))
-		dialog.ShowCustom("Аватар", "Закрыть", view, window)
+		view.SetMinSize(fyne.NewSize(350, 350))
+		dialog.ShowCustom("Профиль", "Закрыть", view, window)
 	}
 
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(time.Second); continue }
-			url := fmt.Sprintf("%s/rest/v1/messages?chat_key=eq.%s&id=gt.%d&order=id.asc&limit=25", supabaseURL, currentRoom, lastID)
+			url := fmt.Sprintf("%s/rest/v1/messages?chat_key=eq.%s&id=gt.%d&order=id.asc&limit=30", supabaseURL, currentRoom, lastID)
 			req, _ := http.NewRequest("GET", url, nil)
 			req.Header.Set("apikey", supabaseKey)
 			req.Header.Set("Authorization", "Bearer "+supabaseKey)
@@ -107,16 +103,33 @@ func main() {
 				resp.Body.Close()
 				for _, m := range msgs {
 					lastID = m.ID
-					// ДЕШИФРОВКА
 					txt := fastCrypt(m.Payload, currentPass, true)
 					
+					// Создаем КРУЖОЧЕК-аватарку
+					circle := canvas.NewCircle(theme.PrimaryColor())
+					circle.SetMinSize(fyne.NewSize(32, 32))
+					circle.StrokeWidth = 2
+					circle.StrokeColor = color.White
+
+					// Делаем кружок кликабельным
 					avData := m.SenderAvatar
-					nameBtn := widget.NewButtonWithIcon(m.Sender, theme.AccountIcon(), func() { viewAvatar(avData) })
-					nameBtn.Importance = widget.LowImportance
+					avatarBtn := widget.NewButton("", func() { viewAvatar(avData) })
+					avatarBtn.Importance = widget.LowImportance // Прозрачная кнопка поверх круга
+					
+					avatarStack := container.NewStack(circle, canvas.NewText("?", color.White), avatarBtn)
+
+					senderName := canvas.NewText(m.Sender, theme.PrimaryColor())
+					senderName.TextSize = 10
 					
 					msgText := widget.NewLabel(txt)
 					msgText.Wrapping = fyne.TextWrapWord
-					chatBox.Add(container.NewVBox(nameBtn, msgText))
+					
+					// Сборка сообщения: [Кружок] [Имя + Текст]
+					row := container.NewHBox(
+						container.NewCenter(avatarStack),
+						container.NewVBox(senderName, msgText),
+					)
+					chatBox.Add(row)
 				}
 				chatBox.Refresh()
 				chatScroll.ScrollToBottom()
@@ -126,7 +139,7 @@ func main() {
 	}()
 
 	msgInput := widget.NewEntry()
-	msgInput.SetPlaceHolder("Безопасное сообщение...")
+	msgInput.SetPlaceHolder("Написать...")
 
 	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
 		if msgInput.Text == "" || currentRoom == "" { return }
@@ -134,9 +147,9 @@ func main() {
 		msgInput.SetText("")
 		go func() {
 			m := Message{
-				Sender:       prefs.StringWithFallback("nickname", "User"),
+				Sender:       prefs.StringWithFallback("nickname", "Meow"),
 				ChatKey:      currentRoom,
-				Payload:      fastCrypt(t, currentPass, false), // ШИФРОВАНИЕ
+				Payload:      fastCrypt(t, currentPass, false),
 				SenderAvatar: prefs.String("avatar_path"),
 			}
 			body, _ := json.Marshal(m)
@@ -148,23 +161,26 @@ func main() {
 		}()
 	})
 
+	// Чтобы клавиатура не перекрывала ввод, используем Border (input в Bottom)
+	bottomBar := container.NewBorder(nil, nil, nil, sendBtn, msgInput)
+
 	window.SetContent(container.NewBorder(
 		container.NewHBox(widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
-			idIn, psIn := widget.NewEntry(), widget.NewEntry()
-			dialog.ShowForm("Вход", "ОК", "X", []*widget.FormItem{
-				{Text: "ID", Widget: idIn}, {Text: "Key", Widget: psIn},
+			idI, psI := widget.NewEntry(), widget.NewEntry()
+			dialog.ShowForm("Connect", "OK", "X", []*widget.FormItem{
+				{Text: "ID", Widget: idI}, {Text: "Key", Widget: psI},
 			}, func(ok bool) {
 				if ok {
-					currentRoom, currentPass = idIn.Text, psIn.Text
+					currentRoom, currentPass = idI.Text, psI.Text
 					chatBox.Objects = nil
 					lastID = 0
 					chatBox.Refresh()
 				}
 			}, window)
-		}), widget.NewLabel("Imperor Secure")),
-		container.NewBorder(nil, nil, nil, sendBtn, msgInput),
+		}), widget.NewLabel("Imperor")),
+		bottomBar, // Поле ввода внизу
 		nil, nil,
-		chatScroll,
+		chatScroll, // Скролл в центре
 	))
 
 	window.ShowAndRun()
