@@ -82,18 +82,13 @@ func getSmallAvatar(base64Str string) fyne.CanvasObject {
 }
 
 func main() {
-	// Отключаем лишние анимации Fyne для Android
 	os.Setenv("FYNE_ANIMATION", "0")
-	myApp := app.NewWithID("com.itoryon.imperor.v24")
+	myApp := app.NewWithID("com.itoryon.imperor.v25")
 	window := myApp.NewWindow("Imperor")
 	window.Resize(fyne.NewSize(450, 800))
 
 	prefs := myApp.Preferences()
 	var currentRoom, currentPass string
-	
-	// Используем более легкий контейнер без динамических расчетов
-	messageBox := container.NewWithoutLayout()
-	messageBox.Resize(fyne.NewSize(450, 10000)) // Предварительный размер
 	
 	chatListContainer := container.NewVBox()
 	chatScroll := container.NewVScroll(chatListContainer)
@@ -101,7 +96,6 @@ func main() {
 	msgInput := widget.NewEntry()
 	msgInput.SetPlaceHolder("Сообщение...")
 
-	// Обновление сообщений
 	go func() {
 		ticker := time.NewTicker(4 * time.Second)
 		for range ticker.C {
@@ -126,7 +120,6 @@ func main() {
 						body := widget.NewLabel(txt)
 						body.Wrapping = fyne.TextWrapWord
 						
-						// Упрощенная структура строки
 						row := container.NewHBox(av, container.NewVBox(name, body))
 						chatListContainer.Add(row)
 					}
@@ -139,15 +132,29 @@ func main() {
 	var panelDialog dialog.Dialog
 	panelHolder := container.NewStack()
 
+	// Объявляем функции заранее для рекурсивного вызова в панели
 	var createMainItems func() fyne.CanvasObject
+	var createProfileItems func() fyne.CanvasObject
 
-	createProfileItems := func() fyne.CanvasObject {
+	createProfileItems = func() fyne.CanvasObject {
 		nick := widget.NewEntry()
 		nick.SetText(prefs.String("nickname"))
+		
+		// Используем пакет image для обработки
 		return container.NewVBox(
 			widget.NewButton("Назад", func() {
 				panelHolder.Objects = []fyne.CanvasObject{createMainItems()}
 				panelHolder.Refresh()
+			}),
+			widget.NewButton("Загрузить фото", func() {
+				dialog.ShowFileOpen(func(r fyne.URIReadCloser, _ error) {
+					if r == nil { return }
+					d, _ := io.ReadAll(r)
+					img, _, _ := image.Decode(bytes.NewReader(d)) // Использование image
+					var buf bytes.Buffer
+					jpeg.Encode(&buf, img, &jpeg.Options{Quality: 10}) // Использование image/jpeg
+					prefs.SetString("avatar_base64", "data:image/jpeg;base64,"+base64.StdEncoding.EncodeToString(buf.Bytes()))
+				}, window)
 			}),
 			nick,
 			widget.NewButton("Сохранить", func() {
@@ -158,6 +165,10 @@ func main() {
 
 	createMainItems = func() fyne.CanvasObject {
 		listCont := container.NewVBox(widget.NewLabelWithStyle("IMPEROR", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
+		listCont.Add(widget.NewButton("Профиль", func() {
+			panelHolder.Objects = []fyne.CanvasObject{createProfileItems()}
+			panelHolder.Refresh()
+		}))
 		
 		chats := strings.Split(prefs.StringWithFallback("chat_list", ""), ",")
 		for _, s := range chats {
@@ -185,13 +196,15 @@ func main() {
 			listCont.Add(container.NewBorder(nil, nil, nil, delBtn, entryBtn))
 		}
 
-		listCont.Add(widget.NewButton("Добавить чат", func() {
+		listCont.Add(widget.NewButton("Добавить", func() {
 			id, ps := widget.NewEntry(), widget.NewEntry()
-			dialog.ShowForm("Добавить", "ОК", "Х", []*widget.FormItem{
+			dialog.ShowForm("Добавить", "OK", "X", []*widget.FormItem{
 				{Text: "ID", Widget: id}, {Text: "Key", Widget: ps},
 			}, func(b bool) {
 				if b {
-					prefs.SetString("chat_list", prefs.String("chat_list")+","+id.Text+":"+ps.Text)
+					old := prefs.String("chat_list")
+					if old != "" { old += "," }
+					prefs.SetString("chat_list", old+id.Text+":"+ps.Text)
 					panelHolder.Objects = []fyne.CanvasObject{createMainItems()}
 					panelHolder.Refresh()
 				}
@@ -224,7 +237,6 @@ func main() {
 		}()
 	})
 
-	// Использование Split для жесткого разделения ввода и чата
 	inputArea := container.NewBorder(nil, nil, nil, sendBtn, msgInput)
 	
 	window.SetContent(container.NewBorder(
