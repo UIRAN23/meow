@@ -46,12 +46,11 @@ var (
 	settingsDialog   dialog.Dialog
 )
 
-// Сжатие картинки, чтобы не лагало
 func compressImage(data []byte) (string, error) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil { return "", err }
 	var buf bytes.Buffer
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 20})
+	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 15})
 	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
@@ -61,13 +60,9 @@ func getAvatarCached(base64Str string, size float32) fyne.CanvasObject {
 		ic.SetMinSize(fyne.NewSize(size, size))
 		return ic
 	}
-	if obj, ok := avatarCache[base64Str]; ok {
-		return obj
-	}
+	if obj, ok := avatarCache[base64Str]; ok { return obj }
 	cleanBase := base64Str
-	if idx := strings.Index(base64Str, ","); idx != -1 {
-		cleanBase = base64Str[idx+1:]
-	}
+	if idx := strings.Index(base64Str, ","); idx != -1 { cleanBase = base64Str[idx+1:] }
 	data, err := base64.StdEncoding.DecodeString(cleanBase)
 	if err == nil {
 		img := canvas.NewImageFromReader(bytes.NewReader(data), "a.jpg")
@@ -83,7 +78,7 @@ func decrypt(cryptoText, key string) string {
 	if !strings.Contains(cryptoText, "=") && len(cryptoText) < 16 { return cryptoText }
 	fixedKey := make([]byte, 32); copy(fixedKey, key)
 	ciphertext, err := base64.StdEncoding.DecodeString(cryptoText)
-	if err != nil || len(ciphertext) < aes.BlockSize { return "[Ошибка]" }
+	if err != nil || len(ciphertext) < aes.BlockSize { return "[Текст]" }
 	block, _ := aes.NewCipher(fixedKey)
 	iv := ciphertext[:aes.BlockSize]; ciphertext = ciphertext[aes.BlockSize:]
 	stream := cipher.NewCFBDecrypter(block, iv)
@@ -102,22 +97,21 @@ func encrypt(text, key string) string {
 }
 
 func main() {
-	os.Setenv("FYNE_SCALE", "1.2")
-
-	myApp := app.NewWithID("com.itoryon.meow.v12")
-	window := myApp.NewWindow("Meow Messenger")
-	window.Resize(fyne.NewSize(450, 750))
+	os.Setenv("FYNE_SCALE", "1.1")
+	myApp := app.NewWithID("com.itoryon.meow.v13")
+	window := myApp.NewWindow("Meow")
+	window.Resize(fyne.NewSize(500, 750)) // Увеличил ширину
 
 	prefs := myApp.Preferences()
 	var currentRoom, currentPass string
 	messageBox := container.NewVBox()
 	chatScroll := container.NewVScroll(messageBox)
-
 	msgInput := widget.NewEntry()
-	msgInput.SetPlaceHolder("Твоё сообщение...")
-	
-	cachedMenuAvatar = getAvatarCached(prefs.String("avatar_base64"), 60)
+	msgInput.SetPlaceHolder("Сообщение...")
 
+	cachedMenuAvatar = getAvatarCached(prefs.String("avatar_base64"), 70)
+
+	// Фоновое обновление чата
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(time.Second); continue }
@@ -125,7 +119,7 @@ func main() {
 			req, _ := http.NewRequest("GET", url, nil)
 			req.Header.Set("apikey", supabaseKey)
 			req.Header.Set("Authorization", "Bearer "+supabaseKey)
-			resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+			resp, err := (&http.Client{Timeout: 4 * time.Second}).Do(req)
 			if err == nil && resp.StatusCode == 200 {
 				var msgs []Message
 				json.NewDecoder(resp.Body).Decode(&msgs)
@@ -134,18 +128,12 @@ func main() {
 					if m.ID > lastMsgID {
 						lastMsgID = m.ID
 						txt := decrypt(m.Payload, currentPass)
-						av := getAvatarCached(m.SenderAvatar, 44)
-						
-						name := widget.NewRichText(&widget.TextSegment{
-							Text: m.Sender, 
-							Style: widget.RichTextStyleStrong,
-						})
-						msgBody := widget.NewLabel(txt)
-						msgBody.Wrapping = fyne.TextWrapBreak
-						
-						bubble := container.NewVBox(name, msgBody)
-						row := container.NewHBox(av, bubble)
-						messageBox.Add(container.NewPadded(row))
+						av := getAvatarCached(m.SenderAvatar, 40)
+						name := widget.NewLabelWithStyle(m.Sender, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+						content := widget.NewLabel(txt)
+						content.Wrapping = fyne.TextWrapBreak
+						row := container.NewHBox(av, container.NewVBox(name, content))
+						messageBox.Add(row)
 					}
 				}
 				chatScroll.ScrollToBottom()
@@ -155,75 +143,89 @@ func main() {
 	}()
 
 	sidebar := container.NewVBox()
-	var refreshSidebar func()
-	refreshSidebar = func() {
+	var refreshSidebar func(tempNick string)
+
+	refreshSidebar = func(tempNick string) {
 		sidebar.Objects = nil
-		sidebar.Add(widget.NewLabelWithStyle("МЕНЮ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
+		sidebar.Add(widget.NewLabelWithStyle("МОЙ ПРОФИЛЬ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
 		sidebar.Add(container.NewCenter(cachedMenuAvatar))
 		
-		nick := widget.NewEntry()
-		nick.SetText(prefs.StringWithFallback("nickname", "User"))
-		sidebar.Add(nick)
-		sidebar.Add(widget.NewButton("Сменить фото", func() {
+		nickEntry := widget.NewEntry()
+		nickEntry.SetPlaceHolder("Введите ваш ник...")
+		if tempNick != "" { 
+			nickEntry.SetText(tempNick) 
+		} else {
+			nickEntry.SetText(prefs.String("nickname"))
+		}
+		sidebar.Add(nickEntry)
+
+		sidebar.Add(widget.NewButtonWithIcon("Выбрать фото", theme.StorageIcon(), func() {
+			currentTypedNick := nickEntry.Text // Сохраняем введенный текст перед открытием диалога
 			dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 				if reader == nil { return }
 				d, _ := io.ReadAll(reader)
 				s, _ := compressImage(d)
 				prefs.SetString("avatar_base64", s)
-				cachedMenuAvatar = getAvatarCached(s, 60)
-				refreshSidebar()
+				cachedMenuAvatar = getAvatarCached(s, 70)
+				refreshSidebar(currentTypedNick) // Возвращаем ник обратно
 			}, window)
 		}))
 
-		sidebar.Add(widget.NewButton("Сохранить ник", func() { prefs.SetString("nickname", nick.Text) }))
+		sidebar.Add(widget.NewButtonWithIcon("Сохранить данные", theme.DocumentSaveIcon(), func() {
+			prefs.SetString("nickname", nickEntry.Text)
+			dialog.ShowInformation("Успех", "Данные обновлены!", window)
+		}))
+
 		sidebar.Add(widget.NewSeparator())
-		
-		sidebar.Add(widget.NewLabelWithStyle("МОИ ЧАТЫ", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}))
+		sidebar.Add(widget.NewLabelWithStyle("НАСТРОЙКИ", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+		sidebar.Add(widget.NewLabel("Тут пока пусто..."))
+		sidebar.Add(widget.NewSeparator())
+
+		sidebar.Add(widget.NewLabelWithStyle("ЧАТЫ", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 		for _, s := range strings.Split(prefs.StringWithFallback("chat_list", ""), ",") {
 			if !strings.Contains(s, ":") { continue }
 			p := strings.Split(s, ":")
 			name, pass := p[0], p[1]
-			sidebar.Add(widget.NewButton("Вход: "+name, func() {
+			sidebar.Add(widget.NewButton("Войти в "+name, func() {
 				messageBox.Objects = nil
 				lastMsgID = 0
 				currentRoom, currentPass = name, pass
 				if settingsDialog != nil { settingsDialog.Hide() }
 			}))
 		}
-		sidebar.Add(widget.NewButtonWithIcon("Новый чат", theme.ContentAddIcon(), func() {
+		sidebar.Add(widget.NewButtonWithIcon("Добавить чат", theme.ContentAddIcon(), func() {
 			id, ps := widget.NewEntry(), widget.NewPasswordEntry()
-			dialog.ShowForm("Добавить", "ОК", "Отмена", []*widget.FormItem{
-				{Text: "ID", Widget: id}, {Text: "Pass", Widget: ps},
+			dialog.ShowForm("Новый чат", "ОК", "Отмена", []*widget.FormItem{
+				{Text: "ID", Widget: id}, {Text: "Пароль", Widget: ps},
 			}, func(b bool) {
-				if b && id.Text != "" {
-					old := prefs.String("chat_list")
-					prefs.SetString("chat_list", old+","+id.Text+":"+ps.Text)
-					refreshSidebar()
+				if b {
+					prefs.SetString("chat_list", prefs.String("chat_list")+","+id.Text+":"+ps.Text)
+					refreshSidebar(nickEntry.Text)
 				}
 			}, window)
 		}))
 	}
 
 	menuBtn := widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
-		refreshSidebar()
-		settingsDialog = dialog.NewCustom("Настройки", "Закрыть", container.NewVScroll(sidebar), window)
-		settingsDialog.Resize(fyne.NewSize(380, 500))
+		refreshSidebar("")
+		settingsDialog = dialog.NewCustom("Панель управления", "Закрыть", container.NewVScroll(sidebar), window)
+		settingsDialog.Resize(fyne.NewSize(400, 600))
 		settingsDialog.Show()
 	})
 
 	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
 		if msgInput.Text == "" || currentRoom == "" { return }
-		content := msgInput.Text
-		msgInput.SetText("") 
+		txt := msgInput.Text
+		msgInput.SetText("")
 		go func() {
 			m := Message{
-				Sender:       prefs.StringWithFallback("nickname", "User"),
+				Sender:       prefs.StringWithFallback("nickname", "Аноним"),
 				ChatKey:      currentRoom,
-				Payload:      encrypt(content, currentPass),
+				Payload:      encrypt(txt, currentPass),
 				SenderAvatar: prefs.String("avatar_base64"),
 			}
-			body, _ := json.Marshal(m)
-			req, _ := http.NewRequest("POST", supabaseURL+"/rest/v1/messages", bytes.NewBuffer(body))
+			b, _ := json.Marshal(m)
+			req, _ := http.NewRequest("POST", supabaseURL+"/rest/v1/messages", bytes.NewBuffer(b))
 			req.Header.Set("apikey", supabaseKey)
 			req.Header.Set("Authorization", "Bearer "+supabaseKey)
 			req.Header.Set("Content-Type", "application/json")
@@ -231,12 +233,9 @@ func main() {
 		}()
 	})
 
-	inputBar := container.NewBorder(nil, nil, nil, sendBtn, container.NewPadded(msgInput))
-	topBar := container.NewHBox(menuBtn, widget.NewLabelWithStyle("MEOW", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
-
 	window.SetContent(container.NewBorder(
-		topBar,
-		container.NewPadded(inputBar),
+		container.NewHBox(menuBtn, widget.NewLabelWithStyle("MEOW", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
+		container.NewBorder(nil, nil, nil, sendBtn, msgInput),
 		nil, nil,
 		chatScroll,
 	))
