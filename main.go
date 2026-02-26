@@ -40,45 +40,16 @@ type Message struct {
 }
 
 var (
-	lastMsgID        int
-	avatarCache      = make(map[string]fyne.CanvasObject)
-	cachedMenuAvatar fyne.CanvasObject
-	settingsDialog   dialog.Dialog
+	lastMsgID   int
+	avatarCache = make(map[string]fyne.CanvasObject)
 )
 
-func compressImage(data []byte) (string, error) {
-	img, _, err := image.Decode(bytes.NewReader(data))
-	if err != nil { return "", err }
-	var buf bytes.Buffer
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 15})
-	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
-}
-
-func getAvatarCached(base64Str string, size float32) fyne.CanvasObject {
-	if base64Str == "" {
-		ic := canvas.NewImageFromResource(theme.AccountIcon())
-		ic.SetMinSize(fyne.NewSize(size, size))
-		return ic
-	}
-	if obj, ok := avatarCache[base64Str]; ok { return obj }
-	cleanBase := base64Str
-	if idx := strings.Index(base64Str, ","); idx != -1 { cleanBase = base64Str[idx+1:] }
-	data, err := base64.StdEncoding.DecodeString(cleanBase)
-	if err == nil {
-		img := canvas.NewImageFromReader(bytes.NewReader(data), "a.jpg")
-		img.FillMode = canvas.ImageFillContain
-		img.SetMinSize(fyne.NewSize(size, size))
-		avatarCache[base64Str] = img
-		return img
-	}
-	return canvas.NewImageFromResource(theme.AccountIcon())
-}
-
+// Оптимизированный дешифратор
 func decrypt(cryptoText, key string) string {
-	if !strings.Contains(cryptoText, "=") && len(cryptoText) < 16 { return cryptoText }
+	if len(cryptoText) < 16 { return cryptoText }
 	fixedKey := make([]byte, 32); copy(fixedKey, key)
 	ciphertext, err := base64.StdEncoding.DecodeString(cryptoText)
-	if err != nil || len(ciphertext) < aes.BlockSize { return "[Текст]" }
+	if err != nil { return "[Ошибка]" }
 	block, _ := aes.NewCipher(fixedKey)
 	iv := ciphertext[:aes.BlockSize]; ciphertext = ciphertext[aes.BlockSize:]
 	stream := cipher.NewCFBDecrypter(block, iv)
@@ -96,22 +67,31 @@ func encrypt(text, key string) string {
 	return base64.StdEncoding.EncodeToString(ciphertext)
 }
 
+func getAvatar(base64Str string) fyne.CanvasObject {
+	if base64Str == "" { return canvas.NewImageFromResource(theme.AccountIcon()) }
+	if obj, ok := avatarCache[base64Str]; ok { return obj }
+	data, _ := base64.StdEncoding.DecodeString(strings.Split(base64Str, ",")[1])
+	img := canvas.NewImageFromReader(bytes.NewReader(data), "a.jpg")
+	img.SetMinSize(fyne.NewSize(40, 40))
+	avatarCache[base64Str] = img
+	return img
+}
+
 func main() {
 	os.Setenv("FYNE_SCALE", "1.1")
-	myApp := app.NewWithID("com.itoryon.meow.v13")
+	myApp := app.NewWithID("com.itoryon.meow.v14")
 	window := myApp.NewWindow("Meow")
-	window.Resize(fyne.NewSize(500, 750)) // Увеличил ширину
+	window.Resize(fyne.NewSize(500, 800))
 
 	prefs := myApp.Preferences()
 	var currentRoom, currentPass string
+	
 	messageBox := container.NewVBox()
 	chatScroll := container.NewVScroll(messageBox)
 	msgInput := widget.NewEntry()
 	msgInput.SetPlaceHolder("Сообщение...")
 
-	cachedMenuAvatar = getAvatarCached(prefs.String("avatar_base64"), 70)
-
-	// Фоновое обновление чата
+	// ГЛАВНЫЙ ЦИКЛ ОБНОВЛЕНИЯ
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(time.Second); continue }
@@ -128,12 +108,21 @@ func main() {
 					if m.ID > lastMsgID {
 						lastMsgID = m.ID
 						txt := decrypt(m.Payload, currentPass)
-						av := getAvatarCached(m.SenderAvatar, 40)
+						
+						// Верстка сообщения: иконка + (Ник + Текст)
+						// Используем фиксированный размер для аватара, чтобы текст не прыгал
+						av := getAvatar(m.SenderAvatar)
+						av.SetMinSize(fyne.NewSize(40, 40))
+						
 						name := widget.NewLabelWithStyle(m.Sender, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 						content := widget.NewLabel(txt)
-						content.Wrapping = fyne.TextWrapBreak
-						row := container.NewHBox(av, container.NewVBox(name, content))
-						messageBox.Add(row)
+						content.Wrapping = fyne.TextWrapWord // Перенос по словам, а не по буквам!
+						
+						bubble := container.NewVBox(name, content)
+						// Border растягивает центральный элемент (текст) на всю доступную ширину
+						row := container.NewBorder(nil, nil, av, nil, bubble)
+						
+						messageBox.Add(container.NewPadded(row))
 					}
 				}
 				chatScroll.ScrollToBottom()
@@ -142,86 +131,100 @@ func main() {
 		}
 	}()
 
-	sidebar := container.NewVBox()
-	var refreshSidebar func(tempNick string)
-
-	refreshSidebar = func(tempNick string) {
-		sidebar.Objects = nil
-		sidebar.Add(widget.NewLabelWithStyle("МОЙ ПРОФИЛЬ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
-		sidebar.Add(container.NewCenter(cachedMenuAvatar))
-		
+	// ФУНКЦИЯ ПРОФИЛЯ
+	showProfile := func() {
 		nickEntry := widget.NewEntry()
-		nickEntry.SetPlaceHolder("Введите ваш ник...")
-		if tempNick != "" { 
-			nickEntry.SetText(tempNick) 
+		nickEntry.SetText(prefs.String("nickname"))
+		nickEntry.SetPlaceHolder("Ваш ник...")
+		
+		var avatarView *canvas.Image
+		if prefs.String("avatar_base64") != "" {
+			data, _ := base64.StdEncoding.DecodeString(strings.Split(prefs.String("avatar_base64"), ",")[1])
+			avatarView = canvas.NewImageFromReader(bytes.NewReader(data), "p.jpg")
 		} else {
-			nickEntry.SetText(prefs.String("nickname"))
+			avatarView = canvas.NewImageFromResource(theme.AccountIcon())
 		}
-		sidebar.Add(nickEntry)
+		avatarView.FillMode = canvas.ImageFillContain
+		avatarView.SetMinSize(fyne.NewSize(120, 120))
 
-		sidebar.Add(widget.NewButtonWithIcon("Выбрать фото", theme.StorageIcon(), func() {
-			currentTypedNick := nickEntry.Text // Сохраняем введенный текст перед открытием диалога
-			dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
-				if reader == nil { return }
-				d, _ := io.ReadAll(reader)
-				s, _ := compressImage(d)
-				prefs.SetString("avatar_base64", s)
-				cachedMenuAvatar = getAvatarCached(s, 70)
-				refreshSidebar(currentTypedNick) // Возвращаем ник обратно
-			}, window)
-		}))
+		profileContent := container.NewVBox(
+			container.NewCenter(avatarView),
+			widget.NewButton("Выбрать фото", func() {
+				dialog.ShowFileOpen(func(r fyne.URIReadCloser, e error) {
+					if r == nil { return }
+					d, _ := io.ReadAll(r)
+					img, _, _ := image.Decode(bytes.NewReader(d))
+					var buf bytes.Buffer
+					jpeg.Encode(&buf, img, &jpeg.Options{Quality: 20})
+					s := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
+					prefs.SetString("avatar_base64", s)
+					// Сразу обновляем превью
+					avatarView.Image = img
+					avatarView.Refresh()
+				}, window)
+			}),
+			nickEntry,
+			widget.NewButtonWithIcon("Сохранить", theme.DocumentSaveIcon(), func() {
+				prefs.SetString("nickname", nickEntry.Text)
+				dialog.ShowInformation("Успех", "Профиль сохранен!", window)
+			}),
+		)
+		dialog.ShowCustom("Мой Профиль", "Закрыть", profileContent, window)
+	}
 
-		sidebar.Add(widget.NewButtonWithIcon("Сохранить данные", theme.DocumentSaveIcon(), func() {
-			prefs.SetString("nickname", nickEntry.Text)
-			dialog.ShowInformation("Успех", "Данные обновлены!", window)
-		}))
+	// ВЫДВИЖНОЕ МЕНЮ (Drawer)
+	drawer := container.NewVBox(
+		widget.NewLabelWithStyle("MEOW MENU", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewButtonWithIcon("Мой Профиль", theme.AccountIcon(), showProfile),
+		widget.NewButtonWithIcon("Настройки", theme.SettingsIcon(), func() {
+			dialog.ShowInformation("Настройки", "Тут скоро что-то будет...", window)
+		}),
+		widget.NewSeparator(),
+		widget.NewLabel("ВАШИ ЧАТЫ:"),
+	)
 
-		sidebar.Add(widget.NewSeparator())
-		sidebar.Add(widget.NewLabelWithStyle("НАСТРОЙКИ", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
-		sidebar.Add(widget.NewLabel("Тут пока пусто..."))
-		sidebar.Add(widget.NewSeparator())
-
-		sidebar.Add(widget.NewLabelWithStyle("ЧАТЫ", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
-		for _, s := range strings.Split(prefs.StringWithFallback("chat_list", ""), ",") {
+	// Список чатов в меню
+	refreshChats := func() {
+		// Очищаем и добавляем заново (кроме первых 5 элементов меню)
+		for len(drawer.Objects) > 5 { drawer.Remove(drawer.Objects[5]) }
+		
+		list := strings.Split(prefs.StringWithFallback("chat_list", ""), ",")
+		for _, s := range list {
 			if !strings.Contains(s, ":") { continue }
 			p := strings.Split(s, ":")
 			name, pass := p[0], p[1]
-			sidebar.Add(widget.NewButton("Войти в "+name, func() {
+			drawer.Add(widget.NewButton(name, func() {
 				messageBox.Objects = nil
 				lastMsgID = 0
 				currentRoom, currentPass = name, pass
-				if settingsDialog != nil { settingsDialog.Hide() }
 			}))
 		}
-		sidebar.Add(widget.NewButtonWithIcon("Добавить чат", theme.ContentAddIcon(), func() {
+		drawer.Add(widget.NewButtonWithIcon("Добавить чат", theme.ContentAddIcon(), func() {
 			id, ps := widget.NewEntry(), widget.NewPasswordEntry()
-			dialog.ShowForm("Новый чат", "ОК", "Отмена", []*widget.FormItem{
-				{Text: "ID", Widget: id}, {Text: "Пароль", Widget: ps},
+			dialog.ShowForm("Новый чат", "ОК", "Нет", []*widget.FormItem{
+				{Text: "ID", Widget: id}, {Text: "Pass", Widget: ps},
 			}, func(b bool) {
 				if b {
 					prefs.SetString("chat_list", prefs.String("chat_list")+","+id.Text+":"+ps.Text)
-					refreshSidebar(nickEntry.Text)
 				}
 			}, window)
 		}))
 	}
 
 	menuBtn := widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
-		refreshSidebar("")
-		settingsDialog = dialog.NewCustom("Панель управления", "Закрыть", container.NewVScroll(sidebar), window)
-		settingsDialog.Resize(fyne.NewSize(400, 600))
-		settingsDialog.Show()
+		refreshChats()
+		dialog.ShowCustomSide("Меню", "Закрыть", container.NewVScroll(drawer), window)
 	})
 
+	// ОТПРАВКА
 	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
 		if msgInput.Text == "" || currentRoom == "" { return }
-		txt := msgInput.Text
-		msgInput.SetText("")
+		t := msgInput.Text; msgInput.SetText("")
 		go func() {
 			m := Message{
-				Sender:       prefs.StringWithFallback("nickname", "Аноним"),
-				ChatKey:      currentRoom,
-				Payload:      encrypt(txt, currentPass),
+				Sender: prefs.StringWithFallback("nickname", "Аноним"),
+				ChatKey: currentRoom,
+				Payload: encrypt(t, currentPass),
 				SenderAvatar: prefs.String("avatar_base64"),
 			}
 			b, _ := json.Marshal(m)
@@ -234,10 +237,9 @@ func main() {
 	})
 
 	window.SetContent(container.NewBorder(
-		container.NewHBox(menuBtn, widget.NewLabelWithStyle("MEOW", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
+		container.NewHBox(menuBtn, widget.NewLabelWithStyle("MEOW CHAT", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
 		container.NewBorder(nil, nil, nil, sendBtn, msgInput),
-		nil, nil,
-		chatScroll,
+		nil, nil, chatScroll,
 	))
 	window.ShowAndRun()
 }
