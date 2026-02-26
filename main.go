@@ -8,11 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"image"
-	"image/jpeg"
-	_ "image/png"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -92,6 +90,9 @@ func encrypt(text, key string) string {
 }
 
 func main() {
+	// Увеличиваем масштаб всего интерфейса (текст и кнопки станут больше)
+	os.Setenv("FYNE_SCALE", "1.2")
+
 	myApp := app.NewWithID("com.itoryon.meow.v12")
 	window := myApp.NewWindow("Meow Messenger")
 	window.Resize(fyne.NewSize(450, 750))
@@ -101,16 +102,11 @@ func main() {
 	messageBox := container.NewVBox()
 	chatScroll := container.NewVScroll(messageBox)
 
-	// --- УЛУЧШЕННОЕ ПОЛЕ ВВОДА ---
 	msgInput := widget.NewEntry()
 	msgInput.SetPlaceHolder("Твоё сообщение...")
 	
-	// Настройка текста: делаем его больше
-	msgInput.TextStyle = fyne.TextStyle{Monospace: false}
-	
 	cachedMenuAvatar = getAvatarCached(prefs.String("avatar_base64"), 60)
 
-	// Цикл чата
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(time.Second); continue }
@@ -129,7 +125,6 @@ func main() {
 						txt := decrypt(m.Payload, currentPass)
 						av := getAvatarCached(m.SenderAvatar, 44)
 						
-						// Сообщения теперь с более крупным текстом
 						name := widget.NewRichText(&widget.TextSegment{
 							Text: m.Sender, 
 							Style: widget.RichTextStyleStrong,
@@ -137,7 +132,6 @@ func main() {
 						msgBody := widget.NewLabel(txt)
 						msgBody.Wrapping = fyne.TextWrapBreak
 						
-						// Увеличиваем размер шрифта меток через кастомный стиль (неявно через контейнер)
 						bubble := container.NewVBox(name, msgBody)
 						row := container.NewHBox(av, bubble)
 						messageBox.Add(container.NewPadded(row))
@@ -158,8 +152,10 @@ func main() {
 		nick := widget.NewEntry()
 		nick.SetText(prefs.StringWithFallback("nickname", "User"))
 		sidebar.Add(nick)
-		sidebar.Add(widget.NewButton("Ник", func() { prefs.SetString("nickname", nick.Text) }))
+		sidebar.Add(widget.NewButton("Сохранить ник", func() { prefs.SetString("nickname", nick.Text) }))
 		sidebar.Add(widget.NewSeparator())
+		
+		sidebar.Add(widget.NewLabelWithStyle("МОИ ЧАТЫ", fyne.TextAlignLeading, fyne.TextStyle{Italic: true}))
 		for _, s := range strings.Split(prefs.StringWithFallback("chat_list", ""), ",") {
 			if !strings.Contains(s, ":") { continue }
 			p := strings.Split(s, ":")
@@ -173,11 +169,12 @@ func main() {
 		}
 		sidebar.Add(widget.NewButtonWithIcon("Новый чат", theme.ContentAddIcon(), func() {
 			id, ps := widget.NewEntry(), widget.NewPasswordEntry()
-			dialog.ShowForm("Добавить", "ОК", "Нет", []*widget.FormItem{
+			dialog.ShowForm("Добавить", "ОК", "Отмена", []*widget.FormItem{
 				{Text: "ID", Widget: id}, {Text: "Pass", Widget: ps},
 			}, func(b bool) {
-				if b {
-					prefs.SetString("chat_list", prefs.String("chat_list")+","+id.Text+":"+ps.Text)
+				if b && id.Text != "" {
+					old := prefs.String("chat_list")
+					prefs.SetString("chat_list", old+","+id.Text+":"+ps.Text)
 					refreshSidebar()
 				}
 			}, window)
@@ -186,7 +183,7 @@ func main() {
 
 	menuBtn := widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
 		refreshSidebar()
-		settingsDialog = dialog.NewCustom("Настройки", "ОК", container.NewVScroll(sidebar), window)
+		settingsDialog = dialog.NewCustom("Настройки", "Закрыть", container.NewVScroll(sidebar), window)
 		settingsDialog.Resize(fyne.NewSize(380, 500))
 		settingsDialog.Show()
 	})
@@ -194,7 +191,7 @@ func main() {
 	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
 		if msgInput.Text == "" || currentRoom == "" { return }
 		content := msgInput.Text
-		msgInput.SetText("") // Очистка
+		msgInput.SetText("") 
 		go func() {
 			m := Message{
 				Sender:       prefs.StringWithFallback("nickname", "User"),
@@ -211,9 +208,7 @@ func main() {
 		}()
 	})
 
-	// --- КОМПОНОВКА ЭКРАНА ---
 	inputBar := container.NewBorder(nil, nil, nil, sendBtn, container.NewPadded(msgInput))
-	
 	topBar := container.NewHBox(menuBtn, widget.NewLabelWithStyle("MEOW", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
 
 	window.SetContent(container.NewBorder(
