@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/color"
 	"image/jpeg"
 	_ "image/png"
 	"io"
@@ -33,23 +32,24 @@ const (
 )
 
 type Message struct {
-	ID           int    `json:"id"` // Добавили ID для проверки уникальности
+	ID           int    `json:"id"` // Добавили ID для отслеживания новых
 	Sender       string `json:"sender"`
 	ChatKey      string `json:"chat_key"`
 	Payload      string `json:"payload"`
 	SenderAvatar string `json:"sender_avatar"`
 }
 
+var lastMsgID int
 var cachedMenuAvatar fyne.CanvasObject
-var lastMsgID int // Храним ID последнего сообщения
 
-// --- ФУНКЦИИ ---
+// --- ОПТИМИЗИРОВАННЫЕ ФУНКЦИИ ---
 
 func compressImage(data []byte) (string, error) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil { return "", err }
 	var buf bytes.Buffer
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 25}) // Еще чуть сильнее сжатие для скорости
+	// Сжимаем до 20% для максимальной скорости на Android
+	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 20})
 	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
@@ -78,8 +78,8 @@ func getAvatarObj(base64Str string, size float32) fyne.CanvasObject {
 	var img *canvas.Image
 	if base64Str != "" {
 		if idx := strings.Index(base64Str, ","); idx != -1 { base64Str = base64Str[idx+1:] }
-		data, err := base64.StdEncoding.DecodeString(base64Str)
-		if err == nil { img = canvas.NewImageFromReader(bytes.NewReader(data), "avatar.jpg") }
+		data, _ := base64.StdEncoding.DecodeString(base64Str)
+		if err == nil { img = canvas.NewImageFromReader(bytes.NewReader(data), "a.jpg") }
 	}
 	if img == nil { img = canvas.NewImageFromResource(theme.AccountIcon()) }
 	img.FillMode = canvas.ImageFillContain
@@ -87,21 +87,10 @@ func getAvatarObj(base64Str string, size float32) fyne.CanvasObject {
 	return img
 }
 
-func showUserProfile(win fyne.Window, name string, avatarStr string) {
-	largeAvatar := getAvatarObj(avatarStr, 250)
-	profileCard := container.NewVBox(
-		container.NewCenter(largeAvatar),
-		widget.NewLabelWithStyle(name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		widget.NewSeparator(),
-		widget.NewLabel("Пользователь Meow"),
-	)
-	dialog.ShowCustom("Профиль", "Закрыть", profileCard, win)
-}
-
 func main() {
 	myApp := app.NewWithID("com.itoryon.meow.v9")
 	myApp.Settings().SetTheme(theme.DarkTheme())
-	window := myApp.NewWindow("Meow Messenger")
+	window := myApp.NewWindow("Meow")
 	window.Resize(fyne.NewSize(400, 700))
 
 	prefs := myApp.Preferences()
@@ -113,13 +102,13 @@ func main() {
 
 	cachedMenuAvatar = getAvatarObj(prefs.String("avatar_base64"), 50)
 
-	// --- УМНОЕ ОБНОВЛЕНИЕ ---
+	// --- УМНОЕ ОБНОВЛЕНИЕ ЧАТА ---
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(2 * time.Second); continue }
 			
-			// Запрашиваем только если есть новые сообщения (по ID)
-			url := fmt.Sprintf("%s/rest/v1/messages?chat_key=eq.%s&order=id.desc&limit=20", supabaseURL, currentRoom)
+			// Запрашиваем только сообщения с ID больше последнего известного
+			url := fmt.Sprintf("%s/rest/v1/messages?chat_key=eq.%s&id=gt.%d&order=id.asc", supabaseURL, currentRoom, lastMsgID)
 			req, _ := http.NewRequest("GET", url, nil)
 			req.Header.Set("apikey", supabaseKey)
 			req.Header.Set("Authorization", "Bearer "+supabaseKey)
@@ -130,118 +119,110 @@ func main() {
 				json.NewDecoder(resp.Body).Decode(&msgs)
 				resp.Body.Close()
 
-				// Если сообщений нет или самое новое уже отображено — ничего не делаем
-				if len(msgs) == 0 || msgs[0].ID == lastMsgID {
-					time.Sleep(4 * time.Second)
-					continue
+				if len(msgs) > 0 {
+					for _, m := range msgs {
+						txt := decrypt(m.Payload, currentPass)
+						
+						// Кэшируем ID последнего сообщения
+						if m.ID > lastMsgID { lastMsgID = m.ID }
+
+						// Создаем строку сообщения ОДИН РАЗ
+						avatar := container.NewStack(
+							getAvatarObj(m.SenderAvatar, 40),
+							widget.NewButton("", func() {
+								dialog.ShowCustom("Профиль", "ОК", 
+									container.NewVBox(container.NewCenter(getAvatarObj(m.SenderAvatar, 200)), widget.NewLabel(m.Sender)), window)
+							}),
+						)
+						
+						name := widget.NewRichText(&widget.TextSegment{Text: m.Sender, Style: widget.RichTextStyleStrong})
+						msgTxt := widget.NewLabel(txt)
+						msgTxt.Wrapping = fyne.TextWrapBreak
+
+						row := container.NewHBox(avatar, container.NewVBox(name, msgTxt))
+						messageBox.Add(row)
+					}
+					chatScroll.ScrollToBottom()
 				}
-
-				lastMsgID = msgs[0].ID
-				messageBox.Objects = nil // Перерисовываем только если реально пришли новые данные
-				
-				for i := len(msgs) - 1; i >= 0; i-- {
-					m := msgs[i]
-					txt := decrypt(m.Payload, currentPass)
-
-					avatarView := container.NewStack(
-						getAvatarObj(m.SenderAvatar, 40),
-						widget.NewButton("", func() { showUserProfile(window, m.Sender, m.SenderAvatar) }),
-					)
-
-					nameLabel := canvas.NewText(m.Sender, color.NRGBA{100, 200, 255, 255})
-					nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-					nameLabel.TextSize = 11
-
-					contentLabel := canvas.NewText(txt, color.White)
-					contentLabel.TextSize = 15
-
-					row := container.NewHBox(avatarView, container.NewVBox(nameLabel, contentLabel))
-					messageBox.Add(row)
-				}
-				chatScroll.ScrollToBottom()
 			}
-			time.Sleep(4 * time.Second) // Увеличили интервал до 4 сек, чтобы снизить нагрузку
+			time.Sleep(2 * time.Second)
 		}
 	}()
 
-	// --- ИНТЕРФЕЙС ---
+	// --- ИНТЕРФЕЙС (ПРОФИЛЬ БЕЗ ЛАГОВ) ---
 	sidebar := container.NewVBox()
-	sidebarScroll := container.NewVScroll(sidebar)
 	
-	chatContent := container.NewBorder(nil, container.NewBorder(nil, nil, nil, widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
-		if msgInput.Text == "" || currentRoom == "" { return }
-		t := msgInput.Text; msgInput.SetText("")
-		go func() {
-			msg := Message{
-				Sender: prefs.StringWithFallback("nickname", "User"),
-				ChatKey: currentRoom,
-				Payload: encrypt(t, currentPass),
-				SenderAvatar: prefs.String("avatar_base64"),
-			}
-			d, _ := json.Marshal(msg); r, _ := http.NewRequest("POST", supabaseURL+"/rest/v1/messages", bytes.NewBuffer(d))
-			r.Header.Set("apikey", supabaseKey); r.Header.Set("Authorization", "Bearer "+supabaseKey)
-			r.Header.Set("Content-Type", "application/json"); (&http.Client{}).Do(r)
-		}()
-	}), msgInput), nil, nil, chatScroll)
-
-	mainStack := container.NewStack(chatContent)
-
-	var refreshSidebar func()
-	refreshSidebar = func() {
+	refreshSidebar := func() {
 		sidebar.Objects = nil
 		sidebar.Add(widget.NewLabelWithStyle("ПРОФИЛЬ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
-		sidebar.Add(container.NewCenter(container.NewStack(cachedMenuAvatar, widget.NewButton("", func() {
-			showUserProfile(window, prefs.StringWithFallback("nickname", "User"), prefs.String("avatar_base64"))
-		}))))
-
-		nickEntry := widget.NewEntry(); nickEntry.SetText(prefs.StringWithFallback("nickname", "User"))
+		sidebar.Add(container.NewCenter(cachedMenuAvatar))
+		
+		nickEntry := widget.NewEntry()
+		nickEntry.SetText(prefs.StringWithFallback("nickname", "User"))
 		sidebar.Add(nickEntry)
-		sidebar.Add(widget.NewButtonWithIcon("Фото", theme.FileImageIcon(), func() {
+
+		sidebar.Add(widget.NewButton("Сменить фото", func() {
 			dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 				if err != nil || reader == nil { return }
-				data, _ := io.ReadAll(reader)
+				d, _ := io.ReadAll(reader)
 				go func() {
-					compressed, _ := compressImage(data)
-					prefs.SetString("avatar_base64", compressed)
-					cachedMenuAvatar = getAvatarObj(compressed, 50)
-					refreshSidebar()
+					s, _ := compressImage(d)
+					prefs.SetString("avatar_base64", s)
+					cachedMenuAvatar = getAvatarObj(s, 50)
+					// Не вызываем refreshSidebar автоматически, чтобы не фризить UI
 				}()
 			}, window)
 		}))
-		sidebar.Add(widget.NewButton("Сохранить", func() { prefs.SetString("nickname", nickEntry.Text) }))
-		sidebar.Add(widget.NewSeparator())
+
+		sidebar.Add(widget.NewButton("Сохранить всё", func() {
+			prefs.SetString("nickname", nickEntry.Text)
+		}))
 		
+		// Список чатов (статичный)
+		sidebar.Add(widget.NewSeparator())
 		for _, s := range strings.Split(prefs.StringWithFallback("chat_list", ""), ",") {
 			if s == "" { continue }
-			p := strings.Split(s, ":"); if len(p) < 2 { continue }
-			r, pass := p[0], p[1]
-			btn := widget.NewButton(r, func() { 
-				currentRoom, currentPass, lastMsgID = r, pass, 0 // Сброс ID при смене комнаты
-				mainStack.Objects = []fyne.CanvasObject{chatContent} 
-			})
-			sidebar.Add(container.NewBorder(nil, nil, nil, widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
-				list := strings.Replace(prefs.String("chat_list"), r+":"+pass, "", -1)
-				prefs.SetString("chat_list", strings.Trim(list, ",")); refreshSidebar()
-			}), btn))
+			p := strings.Split(s, ":")
+			if len(p) < 2 { continue }
+			name, pass := p[0], p[1]
+			sidebar.Add(widget.NewButton("Войти в "+name, func() {
+				messageBox.Objects = nil // Очищаем только при смене комнаты
+				lastMsgID = 0
+				currentRoom, currentPass = name, pass
+			}))
 		}
-		sidebar.Add(widget.NewButton("Добавить чат", func() {
-			rid, rps := widget.NewEntry(), widget.NewPasswordEntry()
-			dialog.ShowForm("Чат", "ОК", "Отмена", []*widget.FormItem{{Text: "ID", Widget: rid}, {Text: "Pass", Widget: rps}}, func(b bool) {
-				if b { 
-					prefs.SetString("chat_list", prefs.String("chat_list")+","+rid.Text+":"+rps.Text)
-					refreshSidebar() 
-				}
-			}, window)
-		}))
 	}
 
 	refreshSidebar()
+
+	// Кнопка меню
 	menuBtn := widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
 		refreshSidebar()
-		split := container.NewHSplit(sidebarScroll, chatContent)
-		split.Offset = 0.4; mainStack.Objects = []fyne.CanvasObject{split}
+		dialog.ShowCustom("Настройки", "Закрыть", container.NewVScroll(sidebar), window)
 	})
 
-	window.SetContent(container.NewBorder(container.NewHBox(menuBtn, widget.NewLabel("Meow")), nil, nil, nil, mainStack))
+	chatUI := container.NewBorder(
+		container.NewHBox(menuBtn, widget.NewLabel("Meow")),
+		container.NewBorder(nil, nil, nil, widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
+			if msgInput.Text == "" || currentRoom == "" { return }
+			t := msgInput.Text; msgInput.SetText("")
+			go func() {
+				msg := Message{
+					Sender: prefs.StringWithFallback("nickname", "User"),
+					ChatKey: currentRoom,
+					Payload: encrypt(t, currentPass),
+					SenderAvatar: prefs.String("avatar_base64"),
+				}
+				d, _ := json.Marshal(msg)
+				r, _ := http.NewRequest("POST", supabaseURL+"/rest/v1/messages", bytes.NewBuffer(d))
+				r.Header.Set("apikey", supabaseKey); r.Header.Set("Authorization", "Bearer "+supabaseKey)
+				r.Header.Set("Content-Type", "application/json")
+				(&http.Client{}).Do(r)
+			}()
+		}), msgInput),
+		nil, nil, chatScroll,
+	)
+
+	window.SetContent(chatUI)
 	window.ShowAndRun()
 }
