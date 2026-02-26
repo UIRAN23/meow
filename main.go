@@ -69,22 +69,23 @@ func fastEncrypt(text, key string) string {
 func getSmallAvatar(base64Str string) fyne.CanvasObject {
 	if base64Str == "" {
 		ic := canvas.NewImageFromResource(theme.AccountIcon())
-		ic.SetMinSize(fyne.NewSize(36, 36))
+		ic.SetMinSize(fyne.NewSize(38, 38))
 		return ic
 	}
 	if obj, ok := avatarCache[base64Str]; ok { return obj }
 	parts := strings.Split(base64Str, ",")
 	data, _ := base64.StdEncoding.DecodeString(parts[len(parts)-1])
 	img := canvas.NewImageFromReader(bytes.NewReader(data), "s.jpg")
-	img.SetMinSize(fyne.NewSize(36, 36))
+	img.FillMode = canvas.ImageFillContain
+	img.SetMinSize(fyne.NewSize(38, 38))
 	avatarCache[base64Str] = img
 	return img
 }
 
 func main() {
 	os.Setenv("FYNE_SCALE", "1.1")
-	myApp := app.NewWithID("com.itoryon.meow.v19")
-	window := myApp.NewWindow("Meow")
+	myApp := app.NewWithID("com.itoryon.imperor.v20")
+	window := myApp.NewWindow("Imperor")
 	window.Resize(fyne.NewSize(500, 800))
 
 	prefs := myApp.Preferences()
@@ -92,9 +93,8 @@ func main() {
 	messageBox := container.NewVBox()
 	chatScroll := container.NewVScroll(messageBox)
 	msgInput := widget.NewEntry()
-	msgInput.SetPlaceHolder("Напиши мяу...")
+	msgInput.SetPlaceHolder("write ur massage")
 
-	// ГЛАВНЫЙ ЦИКЛ ОБНОВЛЕНИЯ (ОПТИМИЗИРОВАННЫЙ)
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(time.Second); continue }
@@ -102,7 +102,6 @@ func main() {
 			req, _ := http.NewRequest("GET", url, nil)
 			req.Header.Set("apikey", supabaseKey)
 			req.Header.Set("Authorization", "Bearer "+supabaseKey)
-			
 			resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
 			if err == nil && resp.StatusCode == 200 {
 				var msgs []Message
@@ -126,51 +125,65 @@ func main() {
 		}
 	}()
 
-	// ДИНАМИЧЕСКИЙ ДИАЛОГ
 	var panelDialog dialog.Dialog
-	panelHolder := container.NewStack() // Контейнер для смены контента
+	panelHolder := container.NewStack()
 
-	// Функция создания Профиля
 	var createMainItems func() fyne.CanvasObject
-	
+
+	// ОКНО ПРОФИЛЯ
 	createProfileItems := func() fyne.CanvasObject {
 		nick := widget.NewEntry()
 		nick.SetText(prefs.String("nickname"))
-		nick.SetPlaceHolder("Твой ник...")
+		
+		// Предпросмотр аватарки
+		preview := canvas.NewImageFromResource(theme.AccountIcon())
+		if prefs.String("avatar_base64") != "" {
+			pts := strings.Split(prefs.String("avatar_base64"), ",")
+			raw, _ := base64.StdEncoding.DecodeString(pts[len(pts)-1])
+			preview = canvas.NewImageFromReader(bytes.NewReader(raw), "p.jpg")
+		}
+		preview.FillMode = canvas.ImageFillContain
+		preview.SetMinSize(fyne.NewSize(120, 120))
+
 		return container.NewVBox(
 			widget.NewButtonWithIcon("Назад", theme.NavigateBackIcon(), func() {
 				panelHolder.Objects = []fyne.CanvasObject{createMainItems()}
 				panelHolder.Refresh()
 			}),
-			widget.NewSeparator(),
-			widget.NewButton("Выбрать фото", func() {
+			container.NewCenter(preview),
+			widget.NewButton("choose photo", func() {
 				dialog.ShowFileOpen(func(r fyne.URIReadCloser, _ error) {
 					if r == nil { return }
 					d, _ := io.ReadAll(r)
 					img, _, _ := image.Decode(bytes.NewReader(d))
 					var buf bytes.Buffer
 					jpeg.Encode(&buf, img, &jpeg.Options{Quality: 15})
-					prefs.SetString("avatar_base64", "data:image/jpeg;base64,"+base64.StdEncoding.EncodeToString(buf.Bytes()))
+					encoded := base64.StdEncoding.EncodeToString(buf.Bytes())
+					prefs.SetString("avatar_base64", "data:image/jpeg;base64,"+encoded)
+					
+					// Мгновенно обновляем превью в профиле
+					preview.Image = img
+					preview.Refresh()
 				}, window)
 			}),
 			nick,
-			widget.NewButton("Сохранить", func() {
+			widget.NewButtonWithIcon("Сохранить", theme.DocumentSaveIcon(), func() {
 				prefs.SetString("nickname", nick.Text)
-				dialog.ShowInformation("Meow", "Данные обновлены", window)
+				dialog.ShowInformation("imperor", "updated!", window)
 			}),
 		)
 	}
 
-	// Главное меню
+	// ГЛАВНОЕ МЕНЮ
 	createMainItems = func() fyne.CanvasObject {
 		listCont := container.NewVBox(
-			widget.NewLabelWithStyle("MEOW MENU", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-			widget.NewButtonWithIcon("Мой Профиль", theme.AccountIcon(), func() {
+			widget.NewLabelWithStyle("menu", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewButtonWithIcon("my profile", theme.AccountIcon(), func() {
 				panelHolder.Objects = []fyne.CanvasObject{createProfileItems()}
 				panelHolder.Refresh()
 			}),
 			widget.NewSeparator(),
-			widget.NewLabel("ЧАТЫ:"),
+			widget.NewLabel("your chats:"),
 		)
 		
 		chats := strings.Split(prefs.StringWithFallback("chat_list", ""), ",")
@@ -185,12 +198,28 @@ func main() {
 				panelDialog.Hide()
 			}))
 		}
+
+		// ВОТ ОНА, КНОПКА ДОБАВЛЕНИЯ!
+		listCont.Add(widget.NewSeparator())
+		listCont.Add(widget.NewButtonWithIcon("Добавить новый чат", theme.ContentAddIcon(), func() {
+			id, ps := widget.NewEntry(), widget.NewPasswordEntry()
+			dialog.ShowForm("Новый чат", "ОК", "Нет", []*widget.FormItem{
+				{Text: "ID", Widget: id}, {Text: "Pass", Widget: ps},
+			}, func(b bool) {
+				if b && id.Text != "" { 
+					prefs.SetString("chat_list", prefs.String("chat_list")+","+id.Text+":"+ps.Text)
+					panelHolder.Objects = []fyne.CanvasObject{createMainItems()}
+					panelHolder.Refresh()
+				}
+			}, window)
+		}))
+
 		return container.NewVScroll(listCont)
 	}
 
 	menuBtn := widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
 		panelHolder.Objects = []fyne.CanvasObject{createMainItems()}
-		panelDialog = dialog.NewCustom("Панель управления", "Закрыть", panelHolder, window)
+		panelDialog = dialog.NewCustom("Настройки", "Закрыть", panelHolder, window)
 		panelDialog.Resize(fyne.NewSize(350, 550))
 		panelDialog.Show()
 	})
@@ -200,7 +229,7 @@ func main() {
 		t := msgInput.Text; msgInput.SetText("")
 		go func() {
 			m := Message{
-				Sender: prefs.String("nickname"),
+				Sender: prefs.StringWithFallback("nickname", "Аноним"),
 				ChatKey: currentRoom,
 				Payload: fastEncrypt(t, currentPass),
 				SenderAvatar: prefs.String("avatar_base64"),
