@@ -25,7 +25,6 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// --- НАСТРОЙКИ ---
 const (
 	supabaseURL = "https://ilszhdmqxsoixcefeoqa.supabase.co"
 	supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc"
@@ -39,17 +38,50 @@ type Message struct {
 	SenderAvatar string `json:"sender_avatar"`
 }
 
-var lastMsgID int
-var cachedMenuAvatar fyne.CanvasObject
-var settingsDialog dialog.Dialog
+var (
+	lastMsgID        int
+	avatarCache      = make(map[string]fyne.CanvasObject) // Тот самый кэш в памяти
+	cachedMenuAvatar fyne.CanvasObject
+	settingsDialog   dialog.Dialog
+)
 
-// Сжатие картинки до экстремально малого размера
+// Кэшированная функция получения аватара
+func getAvatarCached(base64Str string, size float32) fyne.CanvasObject {
+	if base64Str == "" {
+		ic := canvas.NewImageFromResource(theme.AccountIcon())
+		ic.SetMinSize(fyne.NewSize(size, size))
+		return ic
+	}
+
+	// Если эта картинка уже есть в кэше — отдаем её мгновенно
+	if obj, ok := avatarCache[base64Str]; ok {
+		return obj
+	}
+
+	// Если нет — создаем один раз
+	cleanBase := base64Str
+	if idx := strings.Index(base64Str, ","); idx != -1 {
+		cleanBase = base64Str[idx+1:]
+	}
+	data, err := base64.StdEncoding.DecodeString(cleanBase)
+	if err == nil {
+		img := canvas.NewImageFromReader(bytes.NewReader(data), "a.jpg")
+		img.FillMode = canvas.ImageFillContain
+		img.SetMinSize(fyne.NewSize(size, size))
+		
+		// Сохраняем в кэш перед возвратом
+		avatarCache[base64Str] = img
+		return img
+	}
+
+	return canvas.NewImageFromResource(theme.AccountIcon())
+}
+
 func compressImage(data []byte) (string, error) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil { return "", err }
 	var buf bytes.Buffer
-	// Качество 10% - для аватарки в чате больше не нужно, зато летать будет всё
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 10})
+	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 15}) // Качество чуть выше, но все еще легкое
 	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
@@ -57,7 +89,7 @@ func decrypt(cryptoText, key string) string {
 	if !strings.Contains(cryptoText, "=") && len(cryptoText) < 16 { return cryptoText }
 	fixedKey := make([]byte, 32); copy(fixedKey, key)
 	ciphertext, err := base64.StdEncoding.DecodeString(cryptoText)
-	if err != nil || len(ciphertext) < aes.BlockSize { return "[Ошибка расшифровки]" }
+	if err != nil || len(ciphertext) < aes.BlockSize { return "[Ошибка ключа]" }
 	block, _ := aes.NewCipher(fixedKey)
 	iv := ciphertext[:aes.BlockSize]; ciphertext = ciphertext[aes.BlockSize:]
 	stream := cipher.NewCFBDecrypter(block, iv)
@@ -75,25 +107,9 @@ func encrypt(text, key string) string {
 	return base64.StdEncoding.EncodeToString(ciphertext)
 }
 
-func getAvatarObj(base64Str string, size float32) fyne.CanvasObject {
-	if base64Str != "" {
-		if idx := strings.Index(base64Str, ","); idx != -1 { base64Str = base64Str[idx+1:] }
-		data, err := base64.StdEncoding.DecodeString(base64Str)
-		if err == nil {
-			img := canvas.NewImageFromReader(bytes.NewReader(data), "a.jpg")
-			img.FillMode = canvas.ImageFillContain
-			img.SetMinSize(fyne.NewSize(size, size))
-			return img
-		}
-	}
-	ic := canvas.NewImageFromResource(theme.AccountIcon())
-	ic.SetMinSize(fyne.NewSize(size, size))
-	return ic
-}
-
 func main() {
-	myApp := app.NewWithID("com.itoryon.meow.v10")
-	window := myApp.NewWindow("Meow")
+	myApp := app.NewWithID("com.itoryon.meow.v11")
+	window := myApp.NewWindow("Meow Messenger")
 	window.Resize(fyne.NewSize(400, 700))
 
 	prefs := myApp.Preferences()
@@ -101,11 +117,12 @@ func main() {
 	messageBox := container.NewVBox()
 	chatScroll := container.NewVScroll(messageBox)
 	msgInput := widget.NewEntry()
-	msgInput.SetPlaceHolder("Напишите сообщение...")
+	msgInput.SetPlaceHolder("Напишите что-нибудь...")
 
-	cachedMenuAvatar = getAvatarObj(prefs.String("avatar_base64"), 60)
+	// Первичная загрузка своей аватарки
+	cachedMenuAvatar = getAvatarCached(prefs.String("avatar_base64"), 60)
 
-	// Цикл получения сообщений
+	// Цикл чата
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(time.Second); continue }
@@ -121,20 +138,24 @@ func main() {
 				json.NewDecoder(resp.Body).Decode(&msgs)
 				resp.Body.Close()
 
-				for _, m := range msgs {
-					if m.ID > lastMsgID {
-						lastMsgID = m.ID
-						txt := decrypt(m.Payload, currentPass)
-						
-						av := getAvatarObj(m.SenderAvatar, 40)
-						name := widget.NewLabelWithStyle(m.Sender, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-						msgBody := widget.NewLabel(txt)
-						msgBody.Wrapping = fyne.TextWrapBreak
-						
-						row := container.NewHBox(av, container.NewVBox(name, msgBody))
-						messageBox.Add(row)
-						chatScroll.ScrollToBottom()
+				if len(msgs) > 0 {
+					for _, m := range msgs {
+						if m.ID > lastMsgID {
+							lastMsgID = m.ID
+							txt := decrypt(m.Payload, currentPass)
+							
+							// Используем КЭШИРОВАННУЮ аватарку
+							av := getAvatarCached(m.SenderAvatar, 40)
+							
+							name := widget.NewLabelWithStyle(m.Sender, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+							msgBody := widget.NewLabel(txt)
+							msgBody.Wrapping = fyne.TextWrapBreak
+							
+							row := container.NewHBox(av, container.NewVBox(name, msgBody))
+							messageBox.Add(row)
+						}
 					}
+					chatScroll.ScrollToBottom()
 				}
 			}
 			time.Sleep(2 * time.Second)
@@ -145,26 +166,31 @@ func main() {
 	var refreshSidebar func()
 	refreshSidebar = func() {
 		sidebar.Objects = nil
-		sidebar.Add(widget.NewLabelWithStyle("НАСТРОЙКИ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
+		sidebar.Add(widget.NewLabelWithStyle("ПРОФИЛЬ", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}))
 		sidebar.Add(container.NewCenter(cachedMenuAvatar))
 		
 		nick := widget.NewEntry()
 		nick.SetText(prefs.StringWithFallback("nickname", "User"))
 		sidebar.Add(nick)
 		
-		sidebar.Add(widget.NewButton("Сменить фото", func() {
+		sidebar.Add(widget.NewButton("Выбрать фото", func() {
 			dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 				if reader == nil { return }
 				d, _ := io.ReadAll(reader)
 				s, _ := compressImage(d)
 				prefs.SetString("avatar_base64", s)
-				cachedMenuAvatar = getAvatarObj(s, 60)
+				cachedMenuAvatar = getAvatarCached(s, 60)
 				refreshSidebar()
 			}, window)
 		}))
 
-		sidebar.Add(widget.NewButton("Сохранить ник", func() { prefs.SetString("nickname", nick.Text) }))
+		sidebar.Add(widget.NewButton("Сохранить изменения", func() { 
+			prefs.SetString("nickname", nick.Text) 
+			dialog.ShowInformation("Успех", "Профиль обновлен", window)
+		}))
+		
 		sidebar.Add(widget.NewSeparator())
+		sidebar.Add(widget.NewLabel("МОИ ЧАТЫ:"))
 		
 		for _, s := range strings.Split(prefs.StringWithFallback("chat_list", ""), ",") {
 			if !strings.Contains(s, ":") { continue }
@@ -183,7 +209,7 @@ func main() {
 			dialog.ShowForm("Новый чат", "ОК", "Отмена", []*widget.FormItem{
 				{Text: "ID", Widget: id}, {Text: "Пароль", Widget: ps},
 			}, func(b bool) {
-				if b {
+				if b && id.Text != "" {
 					old := prefs.String("chat_list")
 					prefs.SetString("chat_list", old+","+id.Text+":"+ps.Text)
 					refreshSidebar()
@@ -195,7 +221,7 @@ func main() {
 	menuBtn := widget.NewButtonWithIcon("", theme.MenuIcon(), func() {
 		refreshSidebar()
 		settingsDialog = dialog.NewCustom("Настройки", "Закрыть", container.NewVScroll(sidebar), window)
-		settingsDialog.Resize(fyne.NewSize(350, 500))
+		settingsDialog.Resize(fyne.NewSize(350, 550))
 		settingsDialog.Show()
 	})
 
@@ -216,12 +242,11 @@ func main() {
 			req.Header.Set("apikey", supabaseKey)
 			req.Header.Set("Authorization", "Bearer "+supabaseKey)
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Prefer", "return=minimal")
 
 			client := &http.Client{Timeout: 10 * time.Second}
 			resp, err := client.Do(req)
 			if err != nil || resp.StatusCode >= 400 {
-				dialog.ShowError(fmt.Errorf("Ошибка отправки! Проверь RLS в Supabase"), window)
+				dialog.ShowError(fmt.Errorf("Не удалось отправить. Проверь интернет или настройки базы."), window)
 			}
 		}()
 	})
