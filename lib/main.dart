@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-// Твои ключи
 const supabaseUrl = 'https://ilszhdmqxsoixcefeoqa.supabase.co';
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'; // Твой длинный ключ
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'; // Твой ключ
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,125 +12,133 @@ void main() async {
 
 class SignalApp extends StatelessWidget {
   const SignalApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF121212), // Фон Signal
-        primaryColor: const Color(0xFF2090FF), // Синий Signal
+        scaffoldBackgroundColor: const Color(0xFF121212),
+        primaryColor: const Color(0xFF2090FF),
       ),
-      home: const ChatScreen(),
+      home: const MainScreen(),
+    );
+  }
+}
+
+class MainScreen extends StatefulWidget {
+  const MainScreen({super.key});
+  @override
+  State<MainScreen> createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  String myNick = "User";
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Signal'),
+        backgroundColor: const Color(0xFF121212),
+        elevation: 0,
+      ),
+      // ТОТ САМЫЙ БУРГЕР
+      drawer: Drawer(
+        child: Column(
+          children: [
+            UserAccountsDrawerHeader(
+              currentAccountPicture: const CircleAvatar(backgroundColor: Colors.blueAccent),
+              accountName: Text(myNick),
+              accountEmail: const Text("Supabase Protected"),
+              decoration: const BoxDecoration(color: Color(0xFF1C1C1C)),
+            ),
+            ListTile(
+              leading: const Icon(Icons.person),
+              title: const Text("Профиль"),
+              onTap: () {
+                // Здесь можно добавить диалог смены ника
+                Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.settings),
+              title: const Text("Настройки"),
+              subtitle: const Text("В разработке", style: TextStyle(color: Colors.grey, fontSize: 12)),
+              onTap: () {},
+            ),
+          ],
+        ),
+      ),
+      body: const Center(child: Text("Нет активных чатов")),
+      // КНОПКА ПЛЮС
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          // Логика добавления чата
+        },
+        backgroundColor: const Color(0xFF2090FF),
+        child: const Icon(Icons.add, color: Colors.white),
+      ),
     );
   }
 }
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
-
+  final String roomName;
+  const ChatScreen({super.key, required this.roomName});
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
 class _ChatScreenState extends State<ChatScreen> {
   final _msgController = TextEditingController();
-  final _supabase = Supabase.instance.client;
-
-  // Стрим сообщений (Realtime!)
-  late final Stream<List<Map<String, dynamic>>> _msgStream;
+  bool _showSend = false;
 
   @override
   void initState() {
     super.initState();
-    // Во Flutter это делается одной строчкой вместо тикеров в Go!
-    _msgStream = _supabase
-        .from('messages')
-        .stream(primaryKey: ['id'])
-        .order('id', ascending: false);
-  }
-
-  void _sendMessage() async {
-    if (_msgController.text.isEmpty) return;
-    await _supabase.from('messages').insert({
-      'sender': 'User', // Здесь должен быть твой ник
-      'payload': _msgController.text, // В идеале тут шифрование AES
-      'chat_key': 'main_room'
+    _msgController.addListener(() {
+      setState(() {
+        _showSend = _msgController.text.isNotEmpty;
+      });
     });
-    _msgController.clear();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Signal', style: TextStyle(fontWeight: FontWeight.bold)),
-        elevation: 0,
+        title: Text(widget.roomName),
         backgroundColor: const Color(0xFF121212),
-        leading: const Padding(
-          padding: EdgeInsets.all(8.0),
-          child: CircleAvatar(backgroundColor: Colors.blueGrey),
-        ),
+        // Бургера здесь автоматически НЕ будет, будет кнопка "Назад"
       ),
       body: Column(
         children: [
-          Expanded(
-            child: StreamBuilder<List<Map<String, dynamic>>>(
-              stream: _msgStream,
-              builder: (context, snapshot) {
-                if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-                final msgs = snapshot.data!;
-                return ListView.builder(
-                  reverse: true, // Новые сообщения снизу
-                  itemCount: msgs.length,
-                  itemBuilder: (context, index) {
-                    final m = msgs[index];
-                    bool isMe = m['sender'] == 'User';
-                    return Align(
-                      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 12),
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: isMe ? const Color(0xFF2090FF) : const Color(0xFF2D2D2D),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Text(m['payload'] ?? ''),
-                      ),
-                    );
-                  },
-                );
-              },
+          const Expanded(child: Center(child: Text("Сообщений нет"))),
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _msgController,
+                    decoration: InputDecoration(
+                      hintText: "Сообщение",
+                      fillColor: const Color(0xFF2D2D2D),
+                      filled: true,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(25), borderSide: BorderSide.none),
+                    ),
+                  ),
+                ),
+                // ТРЕУГОЛЬНИК ПОЯВЛЯЕТСЯ ТОЛЬКО КОГДА ЕСТЬ ТЕКСТ
+                if (_showSend)
+                  IconButton(
+                    icon: const Icon(Icons.send, color: Color(0xFF2090FF)),
+                    onPressed: () {
+                      _msgController.clear();
+                    },
+                  ),
+              ],
             ),
-          ),
-          _buildInputArea(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInputArea() {
-    return Padding(
-      padding: const EdgeInsets.all(8.0),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _msgController,
-              decoration: InputDecoration(
-                hintText: "Signal message",
-                fillColor: const Color(0xFF2D2D2D),
-                filled: true,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(25), borderSide: BorderSide.none),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          FloatingActionButton(
-            onPressed: _sendMessage,
-            backgroundColor: const Color(0xFF2090FF),
-            child: const Icon(Icons.send),
           ),
         ],
       ),
