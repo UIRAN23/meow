@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:encrypt/encrypt.dart' as enc;
+import 'dart:convert';
 
 // ─── КОНФИГ ──────────────────────────────────────────────────────────────────
 const supabaseUrl = 'https://ilszhdmqxsoixcefeoqa.supabase.co';
@@ -22,30 +22,36 @@ class C {
   static const divider  = Color(0xFF252535);
 }
 
-// ─── УТИЛИТЫ ─────────────────────────────────────────────────────────────────
-Color _avatarColor(String name) {
-  return Colors.primaries[name.hashCode.abs() % Colors.primaries.length];
+// ─── ШИФРОВАНИЕ (XOR + base64, без внешних пакетов) ─────────────────────────
+String _encrypt(String text, String key) {
+  if (key.isEmpty) return text;
+  final textBytes = utf8.encode(text);
+  final keyBytes  = utf8.encode(key);
+  final result    = List<int>.generate(
+    textBytes.length,
+    (i) => textBytes[i] ^ keyBytes[i % keyBytes.length],
+  );
+  return base64.encode(result);
 }
 
-String _encryptText(String text, String rawKey) {
-  if (rawKey.isEmpty) return text;
-  final key       = enc.Key.fromUtf8(rawKey.padRight(32).substring(0, 32));
-  final iv        = enc.IV.fromLength(16);
-  final encrypter = enc.Encrypter(enc.AES(key));
-  return encrypter.encrypt(text, iv: iv).base64;
-}
-
-String _decryptText(String text, String rawKey) {
-  if (rawKey.isEmpty) return text;
+String _decrypt(String text, String key) {
+  if (key.isEmpty) return text;
   try {
-    final key       = enc.Key.fromUtf8(rawKey.padRight(32).substring(0, 32));
-    final iv        = enc.IV.fromLength(16);
-    final encrypter = enc.Encrypter(enc.AES(key));
-    return encrypter.decrypt64(text, iv: iv);
+    final bytes    = base64.decode(text);
+    final keyBytes = utf8.encode(key);
+    final result   = List<int>.generate(
+      bytes.length,
+      (i) => bytes[i] ^ keyBytes[i % keyBytes.length],
+    );
+    return utf8.decode(result);
   } catch (_) {
-    return text;
+    return text; // если не удалось — показываем как есть
   }
 }
+
+// ─── УТИЛИТЫ ─────────────────────────────────────────────────────────────────
+Color _avatarColor(String name) =>
+    Colors.primaries[name.hashCode.abs() % Colors.primaries.length];
 
 // ─── ТОЧКА ВХОДА ─────────────────────────────────────────────────────────────
 void main() async {
@@ -141,7 +147,6 @@ class _MainScreenState extends State<MainScreen> {
     await prefs.setString('nickname', nick);
   }
 
-  // Диалог смены ника
   void _showNickDialog() {
     final ctrl = TextEditingController(text: _nick);
     showModalBottomSheet(
@@ -159,8 +164,9 @@ class _MainScreenState extends State<MainScreen> {
           mainAxisSize:       MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Изменить имя',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: C.text)),
+            const Text('Изменить имя', style: TextStyle(
+              fontSize: 20, fontWeight: FontWeight.w700, color: C.text,
+            )),
             const SizedBox(height: 16),
             TextField(
               controller: ctrl,
@@ -181,10 +187,13 @@ class _MainScreenState extends State<MainScreen> {
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: C.accent,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
                 ),
-                child: const Text('Сохранить',
-                  style: TextStyle(fontWeight: FontWeight.w700, color: Colors.white)),
+                child: const Text('Сохранить', style: TextStyle(
+                  fontWeight: FontWeight.w700, color: Colors.white,
+                )),
               ),
             ),
           ],
@@ -193,7 +202,6 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  // Диалог добавления чата
   void _showAddChat() {
     final idCtrl  = TextEditingController();
     final keyCtrl = TextEditingController();
@@ -212,11 +220,14 @@ class _MainScreenState extends State<MainScreen> {
           mainAxisSize:       MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Новый чат',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: C.text)),
+            const Text('Новый чат', style: TextStyle(
+              fontSize: 20, fontWeight: FontWeight.w700, color: C.text,
+            )),
             const SizedBox(height: 8),
-            const Text('ID чата должен совпадать у обоих собеседников',
-              style: TextStyle(color: C.hint, fontSize: 13)),
+            const Text(
+              'ID чата должен совпадать у обоих собеседников',
+              style: TextStyle(color: C.hint, fontSize: 13),
+            ),
             const SizedBox(height: 16),
             TextField(
               controller: idCtrl,
@@ -237,7 +248,7 @@ class _MainScreenState extends State<MainScreen> {
               width: double.infinity, height: 50,
               child: ElevatedButton(
                 onPressed: () async {
-                  final id  = idCtrl.text.trim();
+                  final id = idCtrl.text.trim();
                   if (id.isEmpty) return;
                   final entry = '$id:${keyCtrl.text.trim()}';
                   if (!_chats.contains(entry)) {
@@ -249,26 +260,16 @@ class _MainScreenState extends State<MainScreen> {
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: C.accent,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
                 ),
-                child: const Text('Добавить',
-                  style: TextStyle(fontWeight: FontWeight.w700, color: Colors.white)),
+                child: const Text('Добавить', style: TextStyle(
+                  fontWeight: FontWeight.w700, color: Colors.white,
+                )),
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  void _openChat(String chatId, String encKey) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ChatScreen(
-          chatId: chatId,
-          encKey: encKey,
-          myNick: _nick,
         ),
       ),
     );
@@ -292,7 +293,7 @@ class _MainScreenState extends State<MainScreen> {
               padding: const EdgeInsets.only(right: 12),
               child: CircleAvatar(
                 radius:          18,
-                backgroundColor: _avatarColor(_nick).withOpacity(0.3),
+                backgroundColor: _avatarColor(_nick).withOpacity(0.25),
                 child: Text(
                   _nick[0].toUpperCase(),
                   style: TextStyle(
@@ -314,12 +315,16 @@ class _MainScreenState extends State<MainScreen> {
                 backgroundColor: _avatarColor(_nick),
                 child: Text(
                   _nick[0].toUpperCase(),
-                  style: const TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.w700),
+                  style: const TextStyle(
+                    fontSize: 24, color: Colors.white, fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
               accountName:  Text(_nick, style: const TextStyle(fontWeight: FontWeight.w700)),
-              accountEmail: const Text('🔒 Шифрование E2EE активно',
-                style: TextStyle(color: C.accent2, fontSize: 12)),
+              accountEmail: const Text(
+                '🔒 Шифрование E2EE активно',
+                style: TextStyle(color: C.accent2, fontSize: 12),
+              ),
               decoration: const BoxDecoration(color: C.card),
             ),
             ListTile(
@@ -333,7 +338,8 @@ class _MainScreenState extends State<MainScreen> {
             const Divider(color: C.divider, indent: 16, endIndent: 16),
             ListTile(
               leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              title:   const Text('Очистить все чаты', style: TextStyle(color: Colors.redAccent)),
+              title:   const Text('Очистить все чаты',
+                style: TextStyle(color: Colors.redAccent)),
               onTap: () async {
                 final prefs = await SharedPreferences.getInstance();
                 await prefs.remove('chats');
@@ -349,9 +355,11 @@ class _MainScreenState extends State<MainScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.lock_outline, size: 64, color: C.hint.withOpacity(0.3)),
+                  Icon(Icons.lock_outline,
+                    size: 64, color: C.hint.withOpacity(0.3)),
                   const SizedBox(height: 16),
-                  const Text('Нет чатов', style: TextStyle(color: C.hint, fontSize: 18)),
+                  const Text('Нет чатов',
+                    style: TextStyle(color: C.hint, fontSize: 18)),
                   const SizedBox(height: 8),
                   const Text('Нажми + чтобы добавить чат по ID',
                     style: TextStyle(color: C.hint, fontSize: 13)),
@@ -361,15 +369,16 @@ class _MainScreenState extends State<MainScreen> {
           : ListView.separated(
               padding:     const EdgeInsets.symmetric(vertical: 8),
               itemCount:   _chats.length,
-              separatorBuilder: (_, __) =>
-                  const Divider(color: C.divider, height: 1, indent: 72),
+              separatorBuilder: (_, __) => const Divider(
+                color: C.divider, height: 1, indent: 72,
+              ),
               itemBuilder: (_, i) {
                 final parts  = _chats[i].split(':');
                 final chatId = parts[0];
                 final encKey = parts.length > 1 ? parts[1] : '';
                 return Dismissible(
-                  key:        Key(_chats[i]),
-                  direction:  DismissDirection.endToStart,
+                  key:       Key(_chats[i]),
+                  direction: DismissDirection.endToStart,
                   onDismissed: (_) => _deleteChat(i),
                   background: Container(
                     alignment: Alignment.centerRight,
@@ -378,8 +387,19 @@ class _MainScreenState extends State<MainScreen> {
                     child:     const Icon(Icons.delete_outline, color: Colors.white),
                   ),
                   child: ListTile(
-                    onTap: () => _openChat(chatId, encKey),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ChatScreen(
+                          chatId: chatId,
+                          encKey: encKey,
+                          myNick: _nick,
+                        ),
+                      ),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 4,
+                    ),
                     leading: CircleAvatar(
                       radius:          26,
                       backgroundColor: _avatarColor(chatId).withOpacity(0.2),
@@ -392,8 +412,9 @@ class _MainScreenState extends State<MainScreen> {
                         ),
                       ),
                     ),
-                    title: Text(chatId,
-                      style: const TextStyle(color: C.text, fontWeight: FontWeight.w600)),
+                    title: Text(chatId, style: const TextStyle(
+                      color: C.text, fontWeight: FontWeight.w600,
+                    )),
                     subtitle: Text(
                       encKey.isNotEmpty ? '🔒 Зашифрован' : '🔓 Без шифрования',
                       style: TextStyle(
@@ -435,7 +456,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _ctrl      = TextEditingController();
   final _supabase  = Supabase.instance.client;
-  final _scrollCtrl = ScrollController();
+  final _scroll    = ScrollController();
   bool  _showSend  = false;
 
   @override
@@ -450,7 +471,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _ctrl.dispose();
-    _scrollCtrl.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -458,30 +479,15 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _ctrl.text.trim();
     if (text.isEmpty) return;
     _ctrl.clear();
-
-    final encrypted = _encryptText(text, widget.encKey);
     await _supabase.from('messages').insert({
       'sender':   widget.myNick,
-      'payload':  encrypted,
+      'payload':  _encrypt(text, widget.encKey),
       'chat_key': widget.chatId,
-    });
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
-        _scrollCtrl.animateTo(
-          0,
-          duration: const Duration(milliseconds: 250),
-          curve:    Curves.easeOut,
-        );
-      }
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    // StreamBuilder — точно как у разработчика, работает без FilterType
     final stream = _supabase
         .from('messages')
         .stream(primaryKey: ['id'])
@@ -507,7 +513,6 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
-          // ── Список сообщений ──────────────────────────────────────────────
           Expanded(
             child: StreamBuilder<List<Map<String, dynamic>>>(
               stream: stream,
@@ -529,35 +534,29 @@ class _ChatScreenState extends State<ChatScreen> {
                     child: CircularProgressIndicator(color: C.accent),
                   );
                 }
-
                 final msgs = snap.data!;
                 if (msgs.isEmpty) {
                   return const Center(
-                    child: Text(
-                      'Напиши первое сообщение',
-                      style: TextStyle(color: C.hint),
-                    ),
+                    child: Text('Напиши первое сообщение',
+                      style: TextStyle(color: C.hint)),
                   );
                 }
-
-                // Автопрокрутка при новых сообщениях
-                _scrollToBottom();
-
                 return ListView.builder(
-                  controller: _scrollCtrl,
-                  reverse:    true, // новые снизу
+                  controller: _scroll,
+                  reverse:    true,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12, vertical: 16,
                   ),
                   itemCount:   msgs.length,
                   itemBuilder: (_, i) {
-                    final m     = msgs[i];
-                    final isMe  = m['sender'] == widget.myNick;
-                    final sender = m['sender'] as String? ?? '?';
-                    final text  = _decryptText(m['payload'] as String? ?? '', widget.encKey);
+                    final m      = msgs[i];
+                    final isMe   = m['sender'] == widget.myNick;
+                    final sender = (m['sender'] as String?) ?? '?';
+                    final raw    = (m['payload'] as String?) ?? '';
+                    // Расшифровываем payload
+                    final text   = _decrypt(raw, widget.encKey);
                     final showNick = i == msgs.length - 1 ||
                         msgs[i + 1]['sender'] != sender;
-
                     String time = '';
                     if (m['created_at'] != null) {
                       time = DateTime.parse(m['created_at'])
@@ -565,20 +564,18 @@ class _ChatScreenState extends State<ChatScreen> {
                           .toString()
                           .substring(11, 16);
                     }
-
                     return _Bubble(
-                      text:      text,
-                      sender:    sender,
-                      time:      time,
-                      isMe:      isMe,
-                      showNick:  showNick && !isMe,
+                      text:     text,
+                      sender:   sender,
+                      time:     time,
+                      isMe:     isMe,
+                      showNick: showNick && !isMe,
                     );
                   },
                 );
               },
             ),
           ),
-
           // ── Поле ввода ────────────────────────────────────────────────────
           Container(
             padding: EdgeInsets.fromLTRB(
@@ -625,13 +622,11 @@ class _ChatScreenState extends State<ChatScreen> {
                             ),
                             child: const Icon(
                               Icons.send_rounded,
-                              color: Colors.white,
-                              size:  20,
+                              color: Colors.white, size: 20,
                             ),
                           ),
                         )
-                      : const SizedBox(
-                          key: ValueKey('empty'), width: 44),
+                      : const SizedBox(key: ValueKey('empty'), width: 44),
                 ),
               ],
             ),
@@ -661,16 +656,12 @@ class _Bubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: EdgeInsets.only(
-        top:    showNick ? 10 : 2,
-        bottom: 2,
-      ),
+      padding: EdgeInsets.only(top: showNick ? 10 : 2, bottom: 2),
       child: Row(
         mainAxisAlignment:
             isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          // Аватар собеседника
           if (!isMe)
             Padding(
               padding: const EdgeInsets.only(right: 6, bottom: 2),
@@ -689,8 +680,6 @@ class _Bubble extends StatelessWidget {
                     )
                   : const SizedBox(width: 28),
             ),
-
-          // Сам пузырь
           Flexible(
             child: Container(
               constraints: BoxConstraints(
@@ -733,8 +722,7 @@ class _Bubble extends StatelessWidget {
                     child: Text(
                       time,
                       style: TextStyle(
-                        color:    C.hint.withOpacity(0.7),
-                        fontSize: 11,
+                        color: C.hint.withOpacity(0.7), fontSize: 11,
                       ),
                     ),
                   ),
