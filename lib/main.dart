@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-// ─── КОНФИГ (в продакшене вынести в .env) ───────────────────────────────────
+// ─── КОНФИГ ──────────────────────────────────────────────────────────────────
 const _kSupabaseUrl = 'https://ilszhdmqxsoixcefeoqa.supabase.co';
 const _kSupabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc'; // Замени на реальный ключ
 
@@ -20,48 +20,26 @@ class AppColors {
   static const divider  = Color(0xFF252535);
 }
 
-// ─── МОДЕЛИ ──────────────────────────────────────────────────────────────────
+// ─── МОДЕЛЬ СООБЩЕНИЯ ────────────────────────────────────────────────────────
+// Таблица messages: created_at | sender | chat_key | payload
 class Message {
-  final String id;
-  final String text;
-  final String nick;
+  final String   sender;
+  final String   chatKey;
+  final String   payload;   // текст сообщения
   final DateTime createdAt;
 
   const Message({
-    required this.id,
-    required this.text,
-    required this.nick,
+    required this.sender,
+    required this.chatKey,
+    required this.payload,
     required this.createdAt,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) => Message(
-    id:        json['id'].toString(),
-    text:      json['text'] as String,
-    nick:      json['nick'] as String,
+    sender:    json['sender']    as String,
+    chatKey:   json['chat_key']  as String,
+    payload:   json['payload']   as String,
     createdAt: DateTime.parse(json['created_at'] as String).toLocal(),
-  );
-}
-
-class ChatRoom {
-  final String id;
-  final String name;
-  final String? lastMessage;
-  final DateTime? lastAt;
-
-  const ChatRoom({
-    required this.id,
-    required this.name,
-    this.lastMessage,
-    this.lastAt,
-  });
-
-  factory ChatRoom.fromJson(Map<String, dynamic> json) => ChatRoom(
-    id:          json['id'].toString(),
-    name:        json['name'] as String,
-    lastMessage: json['last_message'] as String?,
-    lastAt:      json['last_at'] != null
-        ? DateTime.parse(json['last_at'] as String).toLocal()
-        : null,
   );
 }
 
@@ -69,60 +47,73 @@ class ChatRoom {
 class SupabaseService {
   static final _client = Supabase.instance.client;
 
-  // Чат-комнаты
-  static Future<List<ChatRoom>> getRooms() async {
+  // Получить все уникальные chat_key (список чатов)
+  static Future<List<String>> getChatKeys() async {
     final data = await _client
-        .from('rooms')
-        .select()
-        .order('last_at', ascending: false);
-    return (data as List).map((e) => ChatRoom.fromJson(e)).toList();
+        .from('messages')
+        .select('chat_key')
+        .order('created_at', ascending: false);
+
+    final seen = <String>{};
+    final keys = <String>[];
+    for (final row in data as List) {
+      final key = row['chat_key'] as String;
+      if (seen.add(key)) keys.add(key);
+    }
+    return keys;
   }
 
-  static Future<void> createRoom(String name) async {
-    await _client.from('rooms').insert({'name': name});
-  }
-
-  // Сообщения
-  static Future<List<Message>> getMessages(String roomId) async {
+  // Получить последнее сообщение чата (для превью в списке)
+  static Future<Message?> getLastMessage(String chatKey) async {
     final data = await _client
         .from('messages')
         .select()
-        .eq('room_id', roomId)
+        .eq('chat_key', chatKey)
+        .order('created_at', ascending: false)
+        .limit(1)
+        .maybeSingle();
+    if (data == null) return null;
+    return Message.fromJson(data);
+  }
+
+  // Получить все сообщения чата
+  static Future<List<Message>> getMessages(String chatKey) async {
+    final data = await _client
+        .from('messages')
+        .select()
+        .eq('chat_key', chatKey)
         .order('created_at');
     return (data as List).map((e) => Message.fromJson(e)).toList();
   }
 
+  // Отправить сообщение
   static Future<void> sendMessage({
-    required String roomId,
-    required String text,
-    required String nick,
+    required String chatKey,
+    required String sender,
+    required String payload,
   }) async {
     await _client.from('messages').insert({
-      'room_id': roomId,
-      'text':    text,
-      'nick':    nick,
+      'chat_key': chatKey,
+      'sender':   sender,
+      'payload':  payload,
     });
-    await _client.from('rooms').update({
-      'last_message': text,
-      'last_at':      DateTime.now().toUtc().toIso8601String(),
-    }).eq('id', roomId);
   }
 
-  // Realtime подписка на новые сообщения
+  // Realtime — подписка на новые сообщения в чате
   static RealtimeChannel subscribeToMessages(
-    String roomId,
+    String chatKey,
     void Function(Message) onMessage,
   ) {
     return _client
-        .channel('room:$roomId')
+        .channel('chat:$chatKey')
         .onPostgresChanges(
           event:  PostgresChangeEvent.insert,
           schema: 'public',
           table:  'messages',
           filter: PostgresChangeFilter(
-            type:  FilterType.eq,
-            column: 'room_id',
-            value:  roomId,
+            type:   FilterType.eq,
+            column: 'chat_key',
+            value:  chatKey,
           ),
           callback: (payload) {
             final msg = Message.fromJson(payload.newRecord);
@@ -137,9 +128,9 @@ class SupabaseService {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor:            Colors.transparent,
-    statusBarIconBrightness:   Brightness.light,
-    systemNavigationBarColor:  AppColors.bg,
+    statusBarColor:           Colors.transparent,
+    statusBarIconBrightness:  Brightness.light,
+    systemNavigationBarColor: AppColors.bg,
   ));
   await Supabase.initialize(url: _kSupabaseUrl, anonKey: _kSupabaseKey);
   runApp(const MeowApp());
@@ -152,12 +143,12 @@ class MeowApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title:                    'Meow',
+      title:                      'Meow',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: AppColors.bg,
         primaryColor:            AppColors.accent,
-        colorScheme:             const ColorScheme.dark(
+        colorScheme: const ColorScheme.dark(
           primary:   AppColors.accent,
           secondary: AppColors.accent2,
           surface:   AppColors.surface,
@@ -166,23 +157,26 @@ class MeowApp extends StatelessWidget {
           backgroundColor: AppColors.bg,
           elevation:       0,
           centerTitle:     false,
-          titleTextStyle:  TextStyle(
-            color:      AppColors.text,
-            fontSize:   20,
-            fontWeight: FontWeight.w700,
+          titleTextStyle: TextStyle(
+            color:         AppColors.text,
+            fontSize:      20,
+            fontWeight:    FontWeight.w700,
             letterSpacing: -0.5,
           ),
           iconTheme: IconThemeData(color: AppColors.text),
         ),
         inputDecorationTheme: InputDecorationTheme(
-          filled:      true,
-          fillColor:   AppColors.card,
-          hintStyle:   const TextStyle(color: AppColors.hint),
-          border:      OutlineInputBorder(
+          filled:    true,
+          fillColor: AppColors.card,
+          hintStyle: const TextStyle(color: AppColors.hint),
+          border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(24),
             borderSide:   BorderSide.none,
           ),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 20,
+            vertical:   14,
+          ),
         ),
       ),
       home: const NickScreen(),
@@ -200,7 +194,6 @@ class NickScreen extends StatefulWidget {
 
 class _NickScreenState extends State<NickScreen> {
   final _ctrl = TextEditingController();
-  bool _loading = false;
 
   @override
   void dispose() {
@@ -224,10 +217,9 @@ class _NickScreenState extends State<NickScreen> {
         child: Padding(
           padding: const EdgeInsets.all(32),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisAlignment:  MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Логотип
               Container(
                 width:  64,
                 height: 64,
@@ -258,19 +250,19 @@ class _NickScreenState extends State<NickScreen> {
               ),
               const SizedBox(height: 40),
               TextField(
-                controller:     _ctrl,
-                autofocus:      true,
+                controller:      _ctrl,
+                autofocus:       true,
                 textInputAction: TextInputAction.done,
-                onSubmitted:    (_) => _enter(),
-                style:          const TextStyle(color: AppColors.text),
-                decoration:     const InputDecoration(hintText: 'Твоё имя'),
+                onSubmitted:     (_) => _enter(),
+                style:           const TextStyle(color: AppColors.text),
+                decoration:      const InputDecoration(hintText: 'Твоё имя'),
               ),
               const SizedBox(height: 16),
               SizedBox(
-                width: double.infinity,
+                width:  double.infinity,
                 height: 52,
                 child: ElevatedButton(
-                  onPressed: _loading ? null : _enter,
+                  onPressed: _enter,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.accent,
                     foregroundColor: Colors.white,
@@ -278,18 +270,10 @@ class _NickScreenState extends State<NickScreen> {
                       borderRadius: BorderRadius.circular(24),
                     ),
                   ),
-                  child: _loading
-                      ? const SizedBox(
-                          width: 20, height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text(
-                          'Войти',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                        ),
+                  child: const Text(
+                    'Войти',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
                 ),
               ),
             ],
@@ -310,29 +294,40 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  List<ChatRoom> _rooms = [];
-  bool _loading = true;
+  final Map<String, Message?> _chats   = {};
+  List<String>                _keys    = [];
+  bool                        _loading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadRooms();
+    _load();
   }
 
-  Future<void> _loadRooms() async {
+  Future<void> _load() async {
     try {
-      final rooms = await SupabaseService.getRooms();
-      if (mounted) setState(() { _rooms = rooms; _loading = false; });
-    } catch (e) {
+      final keys = await SupabaseService.getChatKeys();
+      final map  = <String, Message?>{};
+      for (final key in keys) {
+        map[key] = await SupabaseService.getLastMessage(key);
+      }
+      if (mounted) {
+        setState(() {
+          _keys    = keys;
+          _chats   = map;
+          _loading = false;
+        });
+      }
+    } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  void _showCreateRoom() {
+  void _showNewChat() {
     final ctrl = TextEditingController();
     showModalBottomSheet(
-      context:        context,
-      backgroundColor: AppColors.surface,
+      context:            context,
+      backgroundColor:    AppColors.surface,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
@@ -343,35 +338,49 @@ class _MainScreenState extends State<MainScreen> {
           MediaQuery.of(ctx).viewInsets.bottom + 24,
         ),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize:       MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Новый чат',
+              'Открыть чат',
               style: TextStyle(
                 fontSize:   20,
                 fontWeight: FontWeight.w700,
                 color:      AppColors.text,
               ),
             ),
+            const SizedBox(height: 8),
+            const Text(
+              'Введи ключ чата — он должен совпадать у обоих собеседников',
+              style: TextStyle(color: AppColors.hint, fontSize: 13),
+            ),
             const SizedBox(height: 16),
             TextField(
               controller: ctrl,
               autofocus:  true,
               style:      const TextStyle(color: AppColors.text),
-              decoration: const InputDecoration(hintText: 'Название чата'),
+              decoration: const InputDecoration(
+                hintText: 'Ключ чата (chat_key)',
+              ),
             ),
             const SizedBox(height: 16),
             SizedBox(
-              width: double.infinity,
+              width:  double.infinity,
               height: 50,
               child: ElevatedButton(
-                onPressed: () async {
-                  final name = ctrl.text.trim();
-                  if (name.isEmpty) return;
+                onPressed: () {
+                  final key = ctrl.text.trim();
+                  if (key.isEmpty) return;
                   Navigator.pop(ctx);
-                  await SupabaseService.createRoom(name);
-                  _loadRooms();
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ChatScreen(
+                        chatKey: key,
+                        myNick:  widget.myNick,
+                      ),
+                    ),
+                  ).then((_) => _load());
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.accent,
@@ -380,7 +389,7 @@ class _MainScreenState extends State<MainScreen> {
                   ),
                 ),
                 child: const Text(
-                  'Создать',
+                  'Открыть',
                   style: TextStyle(
                     fontWeight: FontWeight.w700,
                     color:      Colors.white,
@@ -394,6 +403,15 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  String _formatTime(DateTime? dt) {
+    if (dt == null) return '';
+    final now = DateTime.now();
+    if (dt.day == now.day && dt.month == now.month && dt.year == now.year) {
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    }
+    return '${dt.day}.${dt.month.toString().padLeft(2, '0')}';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -401,8 +419,9 @@ class _MainScreenState extends State<MainScreen> {
         title: const Text('Meow'),
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.only(right: 12),
             child: CircleAvatar(
+              radius:          18,
               backgroundColor: AppColors.accent.withOpacity(0.2),
               child: Text(
                 widget.myNick[0].toUpperCase(),
@@ -413,18 +432,22 @@ class _MainScreenState extends State<MainScreen> {
               ),
             ),
           ),
-          const SizedBox(width: 8),
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
-          : _rooms.isEmpty
+          ? const Center(
+              child: CircularProgressIndicator(color: AppColors.accent),
+            )
+          : _keys.isEmpty
               ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.chat_bubble_outline,
-                          size: 64, color: AppColors.hint.withOpacity(0.4)),
+                      Icon(
+                        Icons.chat_bubble_outline,
+                        size:  64,
+                        color: AppColors.hint.withOpacity(0.3),
+                      ),
                       const SizedBox(height: 16),
                       const Text(
                         'Нет чатов',
@@ -432,116 +455,102 @@ class _MainScreenState extends State<MainScreen> {
                       ),
                       const SizedBox(height: 8),
                       const Text(
-                        'Нажми + чтобы создать',
-                        style: TextStyle(color: AppColors.hint, fontSize: 14),
+                        'Нажми + и введи ключ чата',
+                        style: TextStyle(color: AppColors.hint, fontSize: 13),
                       ),
                     ],
                   ),
                 )
               : RefreshIndicator(
-                  onRefresh:  _loadRooms,
-                  color:      AppColors.accent,
+                  onRefresh: _load,
+                  color:     AppColors.accent,
                   child: ListView.separated(
                     padding:     const EdgeInsets.symmetric(vertical: 8),
-                    itemCount:   _rooms.length,
+                    itemCount:   _keys.length,
                     separatorBuilder: (_, __) => const Divider(
-                      color:   AppColors.divider,
-                      height:  1,
-                      indent:  72,
+                      color:  AppColors.divider,
+                      height: 1,
+                      indent: 72,
                     ),
                     itemBuilder: (_, i) {
-                      final room = _rooms[i];
-                      return _RoomTile(
-                        room:   room,
-                        onTap:  () async {
-                          await Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => ChatScreen(
-                                room:   room,
-                                myNick: widget.myNick,
-                              ),
+                      final key  = _keys[i];
+                      final last = _chats[key];
+                      return ListTile(
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ChatScreen(
+                              chatKey: key,
+                              myNick:  widget.myNick,
                             ),
-                          );
-                          _loadRooms(); // Обновить last_message
-                        },
+                          ),
+                        ).then((_) => _load()),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical:   4,
+                        ),
+                        leading: CircleAvatar(
+                          radius:          26,
+                          backgroundColor: AppColors.accent.withOpacity(0.15),
+                          child: Text(
+                            key[0].toUpperCase(),
+                            style: const TextStyle(
+                              color:      AppColors.accent,
+                              fontWeight: FontWeight.w700,
+                              fontSize:   18,
+                            ),
+                          ),
+                        ),
+                        title: Text(
+                          key,
+                          style: const TextStyle(
+                            color:      AppColors.text,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        subtitle: last != null
+                            ? Text(
+                                '${last.sender}: ${last.payload}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color:    AppColors.hint,
+                                  fontSize: 13,
+                                ),
+                              )
+                            : null,
+                        trailing: last != null
+                            ? Text(
+                                _formatTime(last.createdAt),
+                                style: const TextStyle(
+                                  color:    AppColors.hint,
+                                  fontSize: 12,
+                                ),
+                              )
+                            : null,
                       );
                     },
                   ),
                 ),
       floatingActionButton: FloatingActionButton(
-        onPressed:       _showCreateRoom,
+        onPressed:       _showNewChat,
         backgroundColor: AppColors.accent,
-        child:           const Icon(Icons.add, color: Colors.white),
+        child: const Icon(Icons.add, color: Colors.white),
       ),
-    );
-  }
-}
-
-// ─── ТАЙЛ КОМНАТЫ ────────────────────────────────────────────────────────────
-class _RoomTile extends StatelessWidget {
-  final ChatRoom room;
-  final VoidCallback onTap;
-
-  const _RoomTile({required this.room, required this.onTap});
-
-  String _formatTime(DateTime? dt) {
-    if (dt == null) return '';
-    final now = DateTime.now();
-    if (dt.day == now.day) {
-      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    }
-    return '${dt.day}.${dt.month.toString().padLeft(2, '0')}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      onTap:          onTap,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      leading: CircleAvatar(
-        radius:          26,
-        backgroundColor: AppColors.accent.withOpacity(0.15),
-        child: Text(
-          room.name[0].toUpperCase(),
-          style: const TextStyle(
-            color:      AppColors.accent,
-            fontWeight: FontWeight.w700,
-            fontSize:   18,
-          ),
-        ),
-      ),
-      title: Text(
-        room.name,
-        style: const TextStyle(
-          color:      AppColors.text,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-      subtitle: room.lastMessage != null
-          ? Text(
-              room.lastMessage!,
-              maxLines:   1,
-              overflow:   TextOverflow.ellipsis,
-              style:      const TextStyle(color: AppColors.hint, fontSize: 13),
-            )
-          : null,
-      trailing: room.lastAt != null
-          ? Text(
-              _formatTime(room.lastAt),
-              style: const TextStyle(color: AppColors.hint, fontSize: 12),
-            )
-          : null,
     );
   }
 }
 
 // ─── ЭКРАН ЧАТА ──────────────────────────────────────────────────────────────
 class ChatScreen extends StatefulWidget {
-  final ChatRoom room;
-  final String   myNick;
+  final String chatKey;
+  final String myNick;
 
-  const ChatScreen({super.key, required this.room, required this.myNick});
+  const ChatScreen({
+    super.key,
+    required this.chatKey,
+    required this.myNick,
+  });
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -551,10 +560,10 @@ class _ChatScreenState extends State<ChatScreen> {
   final _msgCtrl    = TextEditingController();
   final _scrollCtrl = ScrollController();
 
-  List<Message>     _messages = [];
-  bool              _loading  = true;
-  bool              _sending  = false;
-  RealtimeChannel?  _channel;
+  List<Message>    _messages = [];
+  bool             _loading  = true;
+  bool             _sending  = false;
+  RealtimeChannel? _channel;
 
   @override
   void initState() {
@@ -573,18 +582,21 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _loadMessages() async {
     try {
-      final msgs = await SupabaseService.getMessages(widget.room.id);
+      final msgs = await SupabaseService.getMessages(widget.chatKey);
       if (mounted) {
-        setState(() { _messages = msgs; _loading = false; });
+        setState(() {
+          _messages = msgs;
+          _loading  = false;
+        });
         _scrollToBottom();
       }
-    } catch (e) {
+    } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
   }
 
   void _subscribeRealtime() {
-    _channel = SupabaseService.subscribeToMessages(widget.room.id, (msg) {
+    _channel = SupabaseService.subscribeToMessages(widget.chatKey, (msg) {
       if (mounted) {
         setState(() => _messages.add(msg));
         _scrollToBottom();
@@ -613,16 +625,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       await SupabaseService.sendMessage(
-        roomId: widget.room.id,
-        text:   text,
-        nick:   widget.myNick,
+        chatKey: widget.chatKey,
+        sender:  widget.myNick,
+        payload: text,
       );
-    } catch (e) {
+    } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content:          Text('Ошибка отправки'),
-            backgroundColor:  Colors.red,
+            content:         Text('Ошибка отправки'),
+            backgroundColor: Colors.red,
           ),
         );
       }
@@ -638,12 +650,12 @@ class _ChatScreenState extends State<ChatScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(widget.room.name),
+            Text(widget.chatKey),
             const Text(
               'онлайн',
               style: TextStyle(
-                color:    AppColors.accent2,
-                fontSize: 12,
+                color:      AppColors.accent2,
+                fontSize:   12,
                 fontWeight: FontWeight.w400,
               ),
             ),
@@ -652,7 +664,6 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
-          // Список сообщений
           Expanded(
             child: _loading
                 ? const Center(
@@ -666,27 +677,25 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       )
                     : ListView.builder(
-                        controller:  _scrollCtrl,
-                        padding:     const EdgeInsets.symmetric(
+                        controller: _scrollCtrl,
+                        padding: const EdgeInsets.symmetric(
                           horizontal: 12,
                           vertical:   16,
                         ),
                         itemCount:   _messages.length,
                         itemBuilder: (_, i) {
-                          final msg   = _messages[i];
-                          final isMe  = msg.nick == widget.myNick;
+                          final msg      = _messages[i];
+                          final isMe     = msg.sender == widget.myNick;
                           final showNick = i == 0 ||
-                              _messages[i - 1].nick != msg.nick;
+                              _messages[i - 1].sender != msg.sender;
                           return _MessageBubble(
-                            message:   msg,
-                            isMe:      isMe,
-                            showNick:  showNick && !isMe,
+                            message:  msg,
+                            isMe:     isMe,
+                            showNick: showNick && !isMe,
                           );
                         },
                       ),
           ),
-
-          // Поле ввода
           _InputBar(
             controller: _msgCtrl,
             sending:    _sending,
@@ -713,7 +722,8 @@ class _MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final time =
-        '${message.createdAt.hour.toString().padLeft(2, '0')}:${message.createdAt.minute.toString().padLeft(2, '0')}';
+        '${message.createdAt.hour.toString().padLeft(2, '0')}:'
+        '${message.createdAt.minute.toString().padLeft(2, '0')}';
 
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -726,7 +736,7 @@ class _MessageBubble extends StatelessWidget {
         ),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color:        isMe ? AppColors.myBubble : AppColors.bubble,
+          color: isMe ? AppColors.myBubble : AppColors.bubble,
           borderRadius: BorderRadius.only(
             topLeft:     Radius.circular(isMe ? 18 : (showNick ? 4 : 18)),
             topRight:    Radius.circular(isMe ? (showNick ? 4 : 18) : 18),
@@ -742,7 +752,7 @@ class _MessageBubble extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
                 child: Text(
-                  message.nick,
+                  message.sender,
                   style: const TextStyle(
                     color:      AppColors.accent2,
                     fontSize:   12,
@@ -750,8 +760,9 @@ class _MessageBubble extends StatelessWidget {
                   ),
                 ),
               ),
+            // payload = текст сообщения
             Text(
-              message.text,
+              message.payload,
               style: const TextStyle(color: AppColors.text, fontSize: 15),
             ),
             const SizedBox(height: 4),
@@ -794,18 +805,18 @@ class _InputBarState extends State<_InputBar> {
   @override
   void initState() {
     super.initState();
-    widget.controller.addListener(_onTextChanged);
+    widget.controller.addListener(_onChanged);
   }
 
   @override
   void dispose() {
-    widget.controller.removeListener(_onTextChanged);
+    widget.controller.removeListener(_onChanged);
     super.dispose();
   }
 
-  void _onTextChanged() {
-    final hasText = widget.controller.text.isNotEmpty;
-    if (hasText != _hasText) setState(() => _hasText = hasText);
+  void _onChanged() {
+    final has = widget.controller.text.isNotEmpty;
+    if (has != _hasText) setState(() => _hasText = has);
   }
 
   @override
@@ -828,9 +839,9 @@ class _InputBarState extends State<_InputBar> {
               minLines:        1,
               textInputAction: TextInputAction.newline,
               style:           const TextStyle(color: AppColors.text),
-              decoration:      const InputDecoration(
-                hintText:        'Сообщение...',
-                contentPadding:  EdgeInsets.symmetric(
+              decoration: const InputDecoration(
+                hintText:       'Сообщение...',
+                contentPadding: EdgeInsets.symmetric(
                   horizontal: 16,
                   vertical:   10,
                 ),
@@ -842,8 +853,8 @@ class _InputBarState extends State<_InputBar> {
             duration: const Duration(milliseconds: 200),
             child: _hasText
                 ? GestureDetector(
-                    key:     const ValueKey('send'),
-                    onTap:   widget.sending ? null : widget.onSend,
+                    key:   const ValueKey('send'),
+                    onTap: widget.sending ? null : widget.onSend,
                     child: Container(
                       width:  44,
                       height: 44,
@@ -858,7 +869,7 @@ class _InputBarState extends State<_InputBar> {
                       child: widget.sending
                           ? const Padding(
                               padding: EdgeInsets.all(12),
-                              child:   CircularProgressIndicator(
+                              child: CircularProgressIndicator(
                                 strokeWidth: 2,
                                 color:       Colors.white,
                               ),
