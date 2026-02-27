@@ -1,28 +1,24 @@
 name: Flutter Build
 
 on:
-  push:
   workflow_dispatch:
     inputs:
-      platforms:
-        description: 'Платформы для сборки'
-        required: true
-        type: choice
-        options:
-          - 'Все платформы'
-          - 'Android'
-          - 'Linux'
-          - 'Windows'
-          - 'Android + Linux'
-          - 'Android + Windows'
-          - 'Linux + Windows'
+      android:
+        description: '📱 Android (APK)'
+        type: boolean
+        default: true
+      linux:
+        description: '🐧 Linux'
+        type: boolean
+        default: false
+      windows:
+        description: '🪟 Windows'
+        type: boolean
+        default: false
 
 jobs:
   build-android:
-    if: |
-      github.event_name == 'push' ||
-      contains(inputs.platforms, 'Android') ||
-      inputs.platforms == 'Все платформы'
+    if: inputs.android == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,10 +57,7 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
 
   build-linux:
-    if: |
-      github.event_name == 'push' ||
-      contains(inputs.platforms, 'Linux') ||
-      inputs.platforms == 'Все платформы'
+    if: inputs.linux == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,10 +99,7 @@ jobs:
           path: build/linux/x64/release/bundle/
 
   build-windows:
-    if: |
-      github.event_name == 'push' ||
-      contains(inputs.platforms, 'Windows') ||
-      inputs.platforms == 'Все платформы'
+    if: inputs.windows == true
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
