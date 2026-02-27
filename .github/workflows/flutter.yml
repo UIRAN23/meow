@@ -1,5 +1,8 @@
 name: Flutter Build APK
-on: [push]
+on:
+  push:
+  workflow_dispatch
+  
 jobs:
   build:
     runs-on: ubuntu-latest
