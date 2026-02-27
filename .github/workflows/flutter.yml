@@ -44,6 +44,7 @@ jobs:
           mv pubspec.yaml pubspec_backup
           flutter create --org com.itoryon.meow --project-name imperor_signal .
           rm -rf lib
+          rm -f pubspec.yaml
           mv lib_backup lib
           mv pubspec_backup pubspec.yaml
 
@@ -85,6 +86,7 @@ jobs:
           mv pubspec.yaml pubspec_backup
           flutter create --org com.itoryon.meow --project-name imperor_signal .
           rm -rf lib
+          rm -f pubspec.yaml
           mv lib_backup lib
           mv pubspec_backup pubspec.yaml
 
@@ -123,8 +125,9 @@ jobs:
           Move-Item pubspec.yaml pubspec_backup
           flutter create --org com.itoryon.meow --project-name imperor_signal .
           Remove-Item -Recurse -Force lib
+          Remove-Item -Force pubspec.yaml
           Move-Item lib_backup lib
-          Move-Item pubspec_backup pubspec.yaml
+          Move-Item pubspec_backup pubspec.yaml -Force
 
       - name: Enable Windows Desktop
         run: flutter config --enable-windows-desktop
