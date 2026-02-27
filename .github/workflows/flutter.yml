@@ -17,14 +17,25 @@ jobs:
         with:
           channel: 'stable'
           
+      - name: Recreate Project Structure
+        # Это создаст папку android и нужные файлы Gradle вокруг твоего кода
+        run: |
+          mv lib lib_backup
+          mv pubspec.yaml pubspec_backup
+          flutter create --org com.itoryon.meow --project-name imperor_signal .
+          rm -rf lib
+          mv lib_backup lib
+          mv pubspec_backup pubspec.yaml
+
       - name: Install Dependencies
         run: flutter pub get
 
       - name: Build APK
-        run: flutter build apk --split-per-abi --release
+        # Собираем fat-apk (один файл для всех процессоров), так проще для начала
+        run: flutter build apk --release
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: release-apk
-          path: build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
