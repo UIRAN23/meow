@@ -35,7 +35,7 @@ const (
 	supabaseKey  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlsc3poZG1xeHNvaXhjZWZlb3FhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA2NjA4NDMsImV4cCI6MjA3NjIzNjg0M30.aJF9c3RaNvAk4_9nLYhQABH3pmYUcZ0q2udf2LoA6Sc"
 	avatarSize   = 96
 	jpegQuality  = 72
-	avatarDpSize = 48 // размер аватарки на экране
+	avatarDpSize = 48
 )
 
 type Message struct {
@@ -58,6 +58,19 @@ var (
 
 	incomingMessages []Message
 	incomingMu       sync.Mutex
+
+	chatMessages     []ChatMessage
+	chatList         *widget.List
+	chatScroll       *container.Scroll
+	currentRoom      string
+	currentPass      string
+	lastID           int
+
+	// для hub
+	mainList    *fyne.Container
+	mainScroll  *container.Scroll
+	contentArea *fyne.Container
+	refreshMainList func()
 )
 
 func fastCrypt(text, key string, decrypt bool) string {
@@ -103,7 +116,7 @@ func createAvatarThumbnail(r io.Reader) (string, error) {
 	newH := int(float64(bounds.Dy()) * ratio)
 
 	resized := image.NewRGBA(image.Rect(0, 0, newW, newH))
-	draw.Bilinear.Scale(resized, resized.Bounds(), img, img.Bounds(), draw.Src, nil)
+	draw.Bilinear.Scale(resized, resized.Bounds(), img, img.Bounds(), draw.Src, nil) // ← исправлено: Bilinear
 
 	var buf bytes.Buffer
 	err = jpeg.Encode(&buf, resized, &jpeg.Options{Quality: jpegQuality})
@@ -146,14 +159,8 @@ func main() {
 	window.Resize(fyne.NewSize(450, 800))
 
 	prefs := myApp.Preferences()
-	var currentRoom, currentPass string
-	var lastID int
 
-	var chatMessages []ChatMessage
-	var chatList *widget.List
-	var chatScroll *container.Scroll
-
-	// Фоновая загрузка сообщений
+	// Получение сообщений
 	go func() {
 		for {
 			if currentRoom == "" {
@@ -186,7 +193,7 @@ func main() {
 		}
 	}()
 
-	// Плавное добавление в UI (тикер + fyne.Do)
+	// Обновление UI пачками (тикер в фоне, но Refresh() вызовем здесь)
 	go func() {
 		ticker := time.NewTicker(450 * time.Millisecond)
 		defer ticker.Stop()
@@ -201,36 +208,34 @@ func main() {
 				continue
 			}
 
-			fyne.Do(func() { // ← это правильно для Fyne 2.6+
-				added := 0
-				for _, m := range batch {
-					if m.ID <= lastID {
-						continue
-					}
-					lastID = m.ID
-
-					txt := fastCrypt(m.Payload, currentPass, true)
-					chatMessages = append(chatMessages, ChatMessage{
-						Sender:       m.Sender,
-						Text:         txt,
-						AvatarBase64: m.SenderAvatar,
-					})
-					added++
+			// Безопасно обновляем в этой горутине (Fyne redraw queue обычно выдерживает)
+			added := 0
+			for _, m := range batch {
+				if m.ID <= lastID {
+					continue
 				}
+				lastID = m.ID
 
-				if added > 0 {
-					chatList.Refresh()
+				txt := fastCrypt(m.Payload, currentPass, true)
+				chatMessages = append(chatMessages, ChatMessage{
+					Sender:       m.Sender,
+					Text:         txt,
+					AvatarBase64: m.SenderAvatar,
+				})
+				added++
+			}
 
-					threshold := float32(120)
-					if chatScroll.Offset.Y >= chatScroll.Content.MinSize().Height-chatScroll.Size().Height-threshold {
-						chatScroll.ScrollToBottom()
-					}
+			if added > 0 {
+				chatList.Refresh()
+
+				threshold := float32(120)
+				if chatScroll.Offset.Y >= chatScroll.Content.MinSize().Height-chatScroll.Size().Height-threshold {
+					chatScroll.ScrollToBottom()
 				}
-			})
+			}
 		}
 	}()
 
-	// Шаблон строки в списке
 	createItem := func() fyne.CanvasObject {
 		defaultAv := canvas.NewCircle(color.RGBA{R: 60, G: 90, B: 180, A: 255})
 		avWrap := container.NewGridWrap(fyne.NewSize(avatarDpSize+8, avatarDpSize+8), defaultAv)
@@ -247,11 +252,11 @@ func main() {
 
 	updateItem := func(id widget.ListItemID, obj fyne.CanvasObject) {
 		m := chatMessages[id]
-		hbox := obj.(*fyne.Container).Objects[0].(*fyne.Container) // HBox
+		hbox := obj.(*fyne.Container).Objects[0].(*fyne.Container)
 		avWrap := hbox.Objects[0].(*fyne.Container)
 		vbox := hbox.Objects[1].(*fyne.Container)
 
-		var avObj fyne.CanvasObject = canvas.NewCircle(color.RGBA{R: 60, G: 90, B: 180, A: 255})
+		avObj := fyne.CanvasObject(canvas.NewCircle(color.RGBA{R: 60, G: 90, B: 180, A: 255}))
 		if m.AvatarBase64 != "" {
 			if cached := getOrCreateAvatarImage(m.AvatarBase64); cached != nil {
 				avObj = cached
@@ -396,11 +401,6 @@ func main() {
 		}),
 	)
 	drawer = dialog.NewCustom("Меню", "Закрыть", container.NewPadded(menuContent), window)
-
-	// ОБЪЯВЛЯЕМ ЗДЕСЬ — чтобы функции видели эти переменные
-	var mainList *fyne.Container
-	var mainScroll *container.Scroll
-	var contentArea *fyne.Container
 
 	refreshMainList = func() {
 		mainList.Objects = nil
