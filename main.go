@@ -22,7 +22,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/layout" // Добавлен пропущенный пакет
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -60,7 +60,7 @@ func fastCrypt(text, key string, decrypt bool) string {
 }
 
 func main() {
-	myApp := app.NewWithID("com.itoryon.imperor.v40")
+	myApp := app.NewWithID("com.itoryon.imperor.v42")
 	window := myApp.NewWindow("Imperor")
 	window.Resize(fyne.NewSize(450, 800))
 
@@ -70,7 +70,17 @@ func main() {
 	
 	chatBox := container.NewVBox()
 	chatScroll := container.NewVScroll(chatBox)
+	
+	mainList := container.NewVBox()
+	mainScroll := container.NewVScroll(mainList)
 
+	// Функция перерисовки списка чатов на главном экране
+	var refreshMainList func()
+	
+	// Контейнер для смены экранов
+	contentArea := container.NewStack()
+
+	// --- ЛОГИКА ЧАТА ---
 	go func() {
 		for {
 			if currentRoom == "" { time.Sleep(time.Second); continue }
@@ -86,8 +96,7 @@ func main() {
 				for _, m := range msgs {
 					lastID = m.ID
 					txt := fastCrypt(m.Payload, currentPass, true)
-					circle := canvas.NewCircle(color.RGBA{R: 80, G: 120, B: 200, A: 255})
-					circle.StrokeWidth = 1; circle.StrokeColor = color.White
+					circle := canvas.NewCircle(color.RGBA{R: 50, G: 50, B: 150, A: 255})
 					avatar := container.NewGridWrap(fyne.NewSize(36, 36), circle)
 					chatBox.Add(container.NewHBox(avatar, container.NewVBox(
 						canvas.NewText(m.Sender, theme.DisabledColor()), 
@@ -101,7 +110,6 @@ func main() {
 	}()
 
 	msgInput := widget.NewEntry()
-	msgInput.SetPlaceHolder("Написать...")
 	sendBtn := widget.NewButtonWithIcon("", theme.MailSendIcon(), func() {
 		if msgInput.Text == "" || currentRoom == "" { return }
 		t := msgInput.Text; msgInput.SetText("")
@@ -121,22 +129,52 @@ func main() {
 		}()
 	})
 
+	// --- ЭКРАНЫ ---
+
+	// Функция открытия конкретного чата
+	openChat := func(name, pass string) {
+		currentRoom, currentPass = name, pass
+		chatBox.Objects = nil
+		lastID = 0
+		
+		chatUI := container.NewBorder(
+			container.NewHBox(
+				widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() {
+					currentRoom = "" // Останавливаем поток
+					refreshMainList()
+				}),
+				widget.NewLabel(name),
+			),
+			container.NewPadded(container.NewBorder(nil, nil, nil, sendBtn, msgInput)),
+			nil, nil,
+			chatScroll,
+		)
+		contentArea.Objects = []fyne.CanvasObject{chatUI}
+		contentArea.Refresh()
+	}
+
+	// Функция настроек профиля
 	showProfile := func() {
 		nickIn := widget.NewEntry()
 		nickIn.SetText(prefs.String("nickname"))
-		btnImg := widget.NewButton("Фото", func() {
-			dialog.ShowFileOpen(func(r fyne.URIReadCloser, _ error) {
-				if r == nil { return }
-				data, _ := io.ReadAll(r); img, _, _ := image.Decode(bytes.NewReader(data))
-				var buf bytes.Buffer
-				jpeg.Encode(&buf, img, &jpeg.Options{Quality: 25})
-				prefs.SetString("avatar_data", base64.StdEncoding.EncodeToString(buf.Bytes()))
-			}, window)
-		})
-		d := dialog.NewCustom("Профиль", "OK", container.NewVBox(nickIn, btnImg, widget.NewButton("Save", func() { prefs.SetString("nickname", nickIn.Text) })), window)
+		d := dialog.NewCustom("Профиль", "OK", container.NewVBox(
+			widget.NewLabel("Ник:"), nickIn,
+			widget.NewButton("Сохранить", func() { prefs.SetString("nickname", nickIn.Text) }),
+		), window)
 		d.Resize(fyne.NewSize(400, 600)); d.Show()
 	}
 
+	// Боковое меню (только для главного экрана)
+	var drawer dialog.Dialog
+	menuContent := container.NewVBox(
+		widget.NewLabelWithStyle("IMPEROR", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewButtonWithIcon("Профиль", theme.AccountIcon(), func() { drawer.Hide(); showProfile() }),
+		widget.NewButtonWithIcon("Настройки", theme.SettingsIcon(), func() { dialog.ShowInformation("!", "В разработке", window) }),
+	)
+	drawer = dialog.NewCustom("Меню", "Закрыть", container.NewPadded(menuContent), window)
+	drawer.Resize(fyne.NewSize(300, 800))
+
+	// Окно добавления чата
 	showAddChat := func() {
 		rIn, pIn := widget.NewEntry(), widget.NewEntry()
 		var d dialog.Dialog
@@ -149,8 +187,8 @@ func main() {
 					if !strings.Contains(list, rIn.Text+":") {
 						prefs.SetString("chat_list", list+"|"+rIn.Text+":"+pIn.Text)
 					}
-					currentRoom, currentPass = rIn.Text, pIn.Text
-					chatBox.Objects = nil; lastID = 0; chatBox.Refresh(); d.Hide()
+					d.Hide()
+					openChat(rIn.Text, pIn.Text)
 				}
 			}),
 		)
@@ -158,43 +196,36 @@ func main() {
 		d.Resize(fyne.NewSize(400, 700)); d.Show()
 	}
 
-	var drawer dialog.Dialog
-	showDrawer := func() {
-		chatList := container.NewVBox()
-		for _, c := range strings.Split(prefs.String("chat_list"), "|") {
-			if !strings.Contains(c, ":") { continue }
-			p := strings.Split(c, ":")
+	// Главный экран (Список чатов)
+	refreshMainList = func() {
+		mainList.Objects = nil
+		saved := strings.Split(prefs.String("chat_list"), "|")
+		for _, s := range saved {
+			if !strings.Contains(s, ":") { continue }
+			p := strings.Split(s, ":")
 			name, pass := p[0], p[1]
-			chatList.Add(widget.NewButton(name, func() {
-				currentRoom, currentPass = name, pass
-				chatBox.Objects = nil; lastID = 0; chatBox.Refresh(); drawer.Hide()
+			mainList.Add(widget.NewButtonWithIcon(name, theme.MessageIcon(), func() {
+				openChat(name, pass)
 			}))
 		}
-		menu := container.NewVBox(
-			widget.NewLabelWithStyle("MENU", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-			widget.NewButton("Профиль", func() { drawer.Hide(); showProfile() }),
-			widget.NewButton("Настройки", func() { dialog.ShowInformation("!", "В разработке", window) }),
-			widget.NewSeparator(),
-			container.NewVScroll(chatList),
+		
+		fab := widget.NewButtonWithIcon("", theme.ContentAddIcon(), showAddChat)
+		fab.Importance = widget.HighImportance
+
+		hubUI := container.NewBorder(
+			container.NewHBox(widget.NewButtonWithIcon("", theme.MenuIcon(), func() { drawer.Show() }), widget.NewLabel("IMPEROR")),
+			nil, nil, nil,
+			container.NewStack(
+				mainScroll,
+				container.NewBorder(nil, container.NewHBox(layout.NewSpacer(), container.NewPadded(fab)), nil, nil),
+			),
 		)
-		drawer = dialog.NewCustom("Imperor", "X", container.NewPadded(menu), window)
-		drawer.Resize(fyne.NewSize(320, 800)); drawer.Show()
+		contentArea.Objects = []fyne.CanvasObject{hubUI}
+		contentArea.Refresh()
 	}
 
-	fab := widget.NewButtonWithIcon("", theme.ContentAddIcon(), showAddChat)
-	fab.Importance = widget.HighImportance
-
-	// Слои интерфейса
-	mainUI := container.NewBorder(
-		container.NewHBox(widget.NewButtonWithIcon("", theme.MenuIcon(), showDrawer), widget.NewLabel("Imperor")),
-		container.NewPadded(container.NewBorder(nil, nil, nil, sendBtn, msgInput)),
-		nil, nil,
-		chatScroll,
-	)
-
-	// Позиционируем FAB через Spacer-ы, чтобы он был в углу, но над вводом
-	fabLayer := container.NewBorder(nil, container.NewHBox(layout.NewSpacer(), container.NewPadded(fab)), nil, nil)
-
-	window.SetContent(container.NewStack(mainUI, fabLayer))
+	// Старт
+	refreshMainList()
+	window.SetContent(contentArea)
 	window.ShowAndRun()
 }
