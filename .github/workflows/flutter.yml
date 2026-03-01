@@ -22,169 +22,119 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v3
+      - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
-
       - name: Cache pub
         uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
             .dart_tool
-          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
-          restore-keys: pub-${{ runner.os }}-
-
+          key: pub-android-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: pub-android-
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: gradle-${{ runner.os }}-
-
-      - name: Recreate project structure
+          key: gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+      - name: Recreate scaffold
         run: |
-          mv lib lib_backup
-          mv pubspec.yaml pubspec_backup
+          mv lib lib_bak && mv pubspec.yaml pub_bak
           flutter create --org com.meow.app --project-name imperor_signal .
-          rm -rf lib
-          mv lib_backup lib
-          mv pubspec_backup pubspec.yaml
-
-      - name: Patch AndroidManifest — permissions
+          rm -rf lib && mv lib_bak lib && mv pub_bak pubspec.yaml
+      - name: Patch AndroidManifest
         run: |
-          MANIFEST=android/app/src/main/AndroidManifest.xml
-          # INTERNET
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.INTERNET" />' $MANIFEST
-          # READ/WRITE media (Android 12 и ниже)
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />' $MANIFEST
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' $MANIFEST
-          # Медиа (Android 13+)
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />' $MANIFEST
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />' $MANIFEST
-          sed -i '/<manifest/a \    <uses-permission android:name="android.permission.CAMERA" />' $MANIFEST
-          # FileProvider для image_picker
-          sed -i 's|</application>|    <provider\n            android:name="androidx.core.content.FileProvider"\n            android:authorities="${applicationId}.fileprovider"\n            android:exported="false"\n            android:grantUriPermissions="true">\n            <meta-data\n                android:name="android.support.FILE_PROVIDER_PATHS"\n                android:resource="@xml/file_paths" />\n        </provider>\n    </application>|' $MANIFEST
-
-      - name: Create file_paths.xml for FileProvider
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's|<manifest|<manifest xmlns:tools="http://schemas.android.com/tools"|' $M
+          for P in "android.permission.INTERNET" "android.permission.CAMERA" "android.permission.READ_MEDIA_IMAGES" "android.permission.READ_MEDIA_VIDEO" "android.permission.READ_EXTERNAL_STORAGE" "android.permission.WRITE_EXTERNAL_STORAGE"; do
+            sed -i "/<manifest/a\\    <uses-permission android:name=\"$P\" />" $M
+          done
+          sed -i 's|</application>|    <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" /></provider>\n    </application>|' $M
+      - name: Create file_paths.xml
         run: |
           mkdir -p android/app/src/main/res/xml
-          cat > android/app/src/main/res/xml/file_paths.xml << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <paths>
-              <external-path name="external_files" path="."/>
-              <cache-path name="cache" path="."/>
-          </paths>
-          EOF
-
-      - name: flutter pub get
-        run: flutter pub get
-
-      - name: Build APK
-        run: flutter build apk --release
-
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<paths>\n  <external-path name="external_files" path="."/>\n  <cache-path name="cache" path="."/>\n</paths>' > android/app/src/main/res/xml/file_paths.xml
+      - run: flutter pub get
+      - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-
-  build-linux:
-    if: ${{ inputs.linux }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Linux deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y clang cmake ninja-build pkg-config \
-            libgtk-3-dev liblzma-dev libstdc++-12-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          cache: true
-
-      - name: Cache pub
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-            .dart_tool
-          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
-          restore-keys: pub-${{ runner.os }}-
-
-      - name: Recreate project structure
-        run: |
-          mv lib lib_backup && mv pubspec.yaml pubspec_backup
-          flutter create --org com.meow.app --project-name imperor_signal .
-          rm -rf lib && mv lib_backup lib && mv pubspec_backup pubspec.yaml
-
-      - run: flutter config --enable-linux-desktop
-      - run: flutter pub get
-      - run: flutter build linux --release
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-build
-          path: build/linux/x64/release/bundle/
 
   build-windows:
     if: ${{ inputs.windows }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           cache: true
-
       - name: Cache pub
         uses: actions/cache@v4
         with:
           path: |
             ~\AppData\Local\Pub\Cache
             .dart_tool
-          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
-          restore-keys: pub-${{ runner.os }}-
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\.gradle\caches
-            ~\.gradle\wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*') }}
-          restore-keys: gradle-${{ runner.os }}-
-
-      - name: Recreate project structure
+          key: pub-windows-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: pub-windows-
+      - name: Recreate scaffold
         run: |
-          Move-Item lib lib_backup
-          Move-Item pubspec.yaml pubspec_backup
+          Move-Item lib lib_bak
+          Move-Item pubspec.yaml pub_bak
           flutter create --org com.meow.app --project-name imperor_signal .
           Remove-Item -Recurse -Force lib
-          Move-Item lib_backup lib
-          Move-Item pubspec_backup pubspec.yaml -Force
-
+          Move-Item lib_bak lib
+          Move-Item pub_bak pubspec.yaml -Force
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - run: flutter build windows --release
-
       - name: Zip
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath windows-build.zip
-
       - uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: windows-build.zip
+
+  build-linux:
+    if: ${{ inputs.linux }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libmpv-dev mpv
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+      - name: Cache pub
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            .dart_tool
+          key: pub-linux-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: pub-linux-
+      - name: Recreate scaffold
+        run: |
+          mv lib lib_bak && mv pubspec.yaml pub_bak
+          flutter create --org com.meow.app --project-name imperor_signal .
+          rm -rf lib && mv lib_bak lib && mv pub_bak pubspec.yaml
+      - run: flutter config --enable-linux-desktop
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: build/linux/x64/release/bundle/
