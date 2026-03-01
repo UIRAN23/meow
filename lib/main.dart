@@ -16,7 +16,6 @@
 
 import 'dart:convert';
 import 'dart:io';
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -24,7 +23,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:video_player/video_player.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 
 // ════════════════════════════════════════════════════════════════════════════
 //  КОНФИГ
@@ -150,6 +150,7 @@ ColorScheme _scheme(BuildContext ctx) => Theme.of(ctx).colorScheme;
 // ════════════════════════════════════════════════════════════════════════════
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   await AppSettings.instance.init();
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor:                    Colors.transparent,
@@ -1058,12 +1059,18 @@ class _VideoB64 extends StatefulWidget {
 }
 
 class _VideoB64State extends State<_VideoB64> {
-  VideoPlayerController? _vc;
+  late final Player            _player;
+  late final VideoController   _ctrl;
   bool   _init = false;
   String? _err;
 
   @override
-  void initState() { super.initState(); _prepare(); }
+  void initState() {
+    super.initState();
+    _player = Player();
+    _ctrl   = VideoController(_player);
+    _prepare();
+  }
 
   Future<void> _prepare() async {
     try {
@@ -1071,15 +1078,15 @@ class _VideoB64State extends State<_VideoB64> {
       final path  = '${Directory.systemTemp.path}/mv_${widget.b64.hashCode}.mp4';
       final file  = File(path);
       if (!await file.exists()) await file.writeAsBytes(bytes);
-      final vc    = VideoPlayerController.file(file);
-      await vc.initialize();
-      if (mounted) setState(() { _vc = vc; _init = true; });
+      await _player.open(Media('file:///$path'), play: false);
+      if (mounted) setState(() => _init = true);
     } catch (e) {
       if (mounted) setState(() => _err = 'Ошибка видео');
     }
   }
 
-  @override void dispose() { _vc?.dispose(); super.dispose(); }
+  @override
+  void dispose() { _player.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
@@ -1094,13 +1101,11 @@ class _VideoB64State extends State<_VideoB64> {
     );
     return GestureDetector(
       onTap: () => Navigator.push(context, MaterialPageRoute(
-          builder: (_) => _FullVideoScreen(vc: _vc!))),
+          builder: (_) => _FullVideoScreen(player: _player, ctrl: _ctrl))),
       child: Stack(alignment: Alignment.center, children: [
-        ClipRRect(borderRadius: BorderRadius.circular(12),
-          child: AspectRatio(
-            aspectRatio: _vc!.value.aspectRatio.clamp(0.5, 2.5),
-            child: VideoPlayer(_vc!),
-          ),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(width: 220, height: 140, child: Video(controller: _ctrl, fit: BoxFit.cover)),
         ),
         Container(
           padding: const EdgeInsets.all(12),
@@ -1131,36 +1136,21 @@ class _FullImageScreen extends StatelessWidget {
 // ════════════════════════════════════════════════════════════════════════════
 //  ПОЛНОЭКРАННОЕ ВИДЕО
 // ════════════════════════════════════════════════════════════════════════════
-class _FullVideoScreen extends StatefulWidget {
-  final VideoPlayerController vc;
-  const _FullVideoScreen({required this.vc});
-  @override State<_FullVideoScreen> createState() => _FullVideoScreenState();
-}
-
-class _FullVideoScreenState extends State<_FullVideoScreen> {
-  @override void initState()  { super.initState(); widget.vc.play(); widget.vc.addListener(_r); }
-  @override void dispose()    { widget.vc.removeListener(_r); widget.vc.pause(); super.dispose(); }
-  void _r() => setState(() {});
+class _FullVideoScreen extends StatelessWidget {
+  final Player          player;
+  final VideoController ctrl;
+  const _FullVideoScreen({required this.player, required this.ctrl});
 
   @override
   Widget build(BuildContext context) {
-    final cs = _scheme(context);
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(backgroundColor: Colors.transparent, foregroundColor: Colors.white),
       body: GestureDetector(
-        onTap: () { widget.vc.value.isPlaying ? widget.vc.pause() : widget.vc.play(); },
-        child: Stack(alignment: Alignment.center, children: [
-          Center(child: AspectRatio(
-            aspectRatio: widget.vc.value.aspectRatio,
-            child: VideoPlayer(widget.vc),
-          )),
-          Positioned(bottom: 40, left: 20, right: 20,
-            child: VideoProgressIndicator(widget.vc, allowScrubbing: true,
-              colors: VideoProgressColors(
-                playedColor: cs.primary, bufferedColor: Colors.white30,
-                backgroundColor: Colors.white12))),
-        ]),
+        onTap: () { player.state.playing ? player.pause() : player.play(); },
+        child: Center(
+          child: Video(controller: ctrl, fit: BoxFit.contain),
+        ),
       ),
     );
   }
