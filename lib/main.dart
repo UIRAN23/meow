@@ -1,24 +1,19 @@
 // ════════════════════════════════════════════════════════════════════════════
-//  SQL для Supabase (выполни один раз в SQL Editor):
+//  SQL (выполни один раз в Supabase SQL Editor):
 //
-//  create table messages (
+//  create table if not exists messages (
 //    id         bigint generated always as identity primary key,
 //    created_at timestamptz default now(),
 //    sender     text not null,
 //    chat_key   text not null,
 //    payload    text default '',
-//    file_url   text,
 //    file_type  text default 'text'
 //  );
-//  create index on messages(chat_key, id);
+//  create index if not exists messages_chat_idx on messages(chat_key, id);
 //  alter table messages disable row level security;
-//
-//  insert into storage.buckets (id, name, public)
-//    values ('media', 'media', true);
-//  create policy "media_all" on storage.objects for all
-//    using (bucket_id = 'media') with check (bucket_id = 'media');
 // ════════════════════════════════════════════════════════════════════════════
 
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
@@ -28,7 +23,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -47,7 +41,6 @@ class ChatEntry {
   final String id;
   final String key;
   ChatEntry(this.id, this.key);
-
   String serialize() => '$id\x01$key';
   static ChatEntry from(String s) {
     final idx = s.indexOf('\x01');
@@ -72,7 +65,7 @@ class AppSettings extends ChangeNotifier {
   int    _chatBg       = 0;
   double _glassBlur    = 20;
   double _glassOpacity = 0.15;
-  String _avatarUrl    = '';
+  String _avatarB64    = ''; // аватар хранится как base64
 
   bool   get dark         => _dark;
   int    get accentIdx    => _accentIdx;
@@ -81,7 +74,7 @@ class AppSettings extends ChangeNotifier {
   int    get chatBg       => _chatBg;
   double get glassBlur    => _glassBlur;
   double get glassOpacity => _glassOpacity;
-  String get avatarUrl    => _avatarUrl;
+  String get avatarB64    => _avatarB64;
 
   static const accents = [
     Color(0xFF6C63FF),
@@ -102,7 +95,7 @@ class AppSettings extends ChangeNotifier {
     _chatBg       = p.getInt('chatBg')         ?? 0;
     _glassBlur    = p.getDouble('glassBlur')   ?? 20;
     _glassOpacity = p.getDouble('glassOpacity') ?? 0.15;
-    _avatarUrl    = p.getString('avatarUrl')   ?? '';
+    _avatarB64    = p.getString('avatarB64')   ?? '';
     notifyListeners();
   }
 
@@ -114,25 +107,33 @@ class AppSettings extends ChangeNotifier {
   Future<void> setChatBg(int v)          async { _chatBg = v;       (await _p).setInt('chatBg', v);          notifyListeners(); }
   Future<void> setGlassBlur(double v)    async { _glassBlur = v;    (await _p).setDouble('glassBlur', v);    notifyListeners(); }
   Future<void> setGlassOpacity(double v) async { _glassOpacity = v; (await _p).setDouble('glassOpacity', v); notifyListeners(); }
-  Future<void> setAvatarUrl(String v)    async { _avatarUrl = v;    (await _p).setString('avatarUrl', v);    notifyListeners(); }
+  Future<void> setAvatarB64(String v)    async { _avatarB64 = v;    (await _p).setString('avatarB64', v);    notifyListeners(); }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  ШИФРОВАНИЕ — совместимо с itoryon/meow
+//  ШИФРОВАНИЕ
+//  Ключ: padRight(32) → ровно 32 байта. IV: 16 нулевых байт.
+//  Возвращает null если расшифровка не удалась (неверный ключ).
 // ════════════════════════════════════════════════════════════════════════════
 String _encrypt(String text, String rawKey) {
   if (rawKey.isEmpty) return text;
-  final key = enc.Key.fromUtf8(rawKey.padRight(32).substring(0, 32));
-  return enc.Encrypter(enc.AES(key)).encrypt(text, iv: enc.IV.fromLength(16)).base64;
+  final k = enc.Key.fromUtf8(rawKey.padRight(32).substring(0, 32));
+  return enc.Encrypter(enc.AES(k)).encrypt(text, iv: enc.IV.fromLength(16)).base64;
 }
 
-String _decrypt(String text, String rawKey) {
+/// Возвращает расшифрованный текст или null если ключ неверный
+String? _tryDecrypt(String text, String rawKey) {
   if (rawKey.isEmpty) return text;
+  // Если текст не похож на base64 — возможно не зашифрован
+  if (!RegExp(r'^[A-Za-z0-9+/=]+$').hasMatch(text)) return text;
   try {
-    final key = enc.Key.fromUtf8(rawKey.padRight(32).substring(0, 32));
-    return enc.Encrypter(enc.AES(key)).decrypt64(text, iv: enc.IV.fromLength(16));
+    final k = enc.Key.fromUtf8(rawKey.padRight(32).substring(0, 32));
+    final result = enc.Encrypter(enc.AES(k)).decrypt64(text, iv: enc.IV.fromLength(16));
+    // Проверка: результат должен быть читаемым UTF-8
+    utf8.encode(result); // throws if invalid
+    return result;
   } catch (_) {
-    return text;
+    return null; // неверный ключ
   }
 }
 
@@ -149,7 +150,24 @@ Future<void> _openUrl(String url) async {
   if (await canLaunchUrl(uri)) launchUrl(uri, mode: LaunchMode.externalApplication);
 }
 
-String _uid() => DateTime.now().millisecondsSinceEpoch.toString();
+/// Сжимает изображение до base64 (макс ~200KB итогового текста)
+Future<String?> _fileToBase64(XFile xf, {int quality = 60, int maxDim = 800}) async {
+  final bytes = await xf.readAsBytes();
+  // Ограничиваем размер — если больше 150KB, снижаем качество
+  if (bytes.length > 150 * 1024) {
+    // Пересжимаем с меньшим качеством через image_picker с ограничением
+    final reXf = await _picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 40,
+      maxWidth: maxDim.toDouble(),
+      maxHeight: maxDim.toDouble(),
+    );
+    if (reXf == null) return null;
+    final reBytes = await reXf.readAsBytes();
+    return base64Encode(reBytes);
+  }
+  return base64Encode(bytes);
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 //  ТОЧКА ВХОДА
@@ -212,10 +230,10 @@ class _MeowAppState extends State<MeowApp> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  LIQUID GLASS — настоящий с бликами
+//  LIQUID GLASS — с настоящими бликами
 // ════════════════════════════════════════════════════════════════════════════
 class LiquidGlass extends StatelessWidget {
-  final Widget        child;
+  final Widget child;
   final BorderRadius? radius;
   final EdgeInsets?   padding;
   final double?       blur;
@@ -239,15 +257,10 @@ class LiquidGlass extends StatelessWidget {
     return ClipRRect(
       borderRadius: br,
       child: BackdropFilter(
-        filter: ImageFilter.compose(
-          outer: ImageFilter.blur(sigmaX: b, sigmaY: b),
-          inner: ImageFilter.blur(sigmaX: 0, sigmaY: 0),
-        ),
+        filter: ImageFilter.blur(sigmaX: b, sigmaY: b),
         child: CustomPaint(
           painter: _LiquidPainter(br, op, base, dark),
-          child: padding != null
-              ? Padding(padding: padding!, child: child)
-              : child,
+          child: padding != null ? Padding(padding: padding!, child: child) : child,
         ),
       ),
     );
@@ -263,55 +276,50 @@ class _LiquidPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final rrect = br.toRRect(Rect.fromLTWH(0, 0, size.width, size.height));
+    final rect  = Rect.fromLTWH(0, 0, size.width, size.height);
+    final rrect = br.toRRect(rect);
 
-    // 1. Базовый заливка
+    // Базовая заливка
     canvas.drawRRect(rrect, Paint()..color = base.withOpacity(opacity));
 
-    // 2. Бликовая рамка — сверху/слева светло, снизу/справа темно
+    // Градиентная рамка-блик (светло сверху, темно снизу)
     canvas.drawRRect(rrect, Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.2
       ..shader = LinearGradient(
         begin: Alignment.topLeft, end: Alignment.bottomRight,
         colors: [
-          Colors.white.withOpacity(dark ? 0.45 : 0.8),
-          Colors.white.withOpacity(dark ? 0.15 : 0.4),
-          Colors.black.withOpacity(dark ? 0.15 : 0.05),
-          Colors.black.withOpacity(dark ? 0.25 : 0.1),
+          Colors.white.withOpacity(dark ? 0.50 : 0.85),
+          Colors.white.withOpacity(dark ? 0.18 : 0.45),
+          Colors.black.withOpacity(dark ? 0.12 : 0.04),
+          Colors.black.withOpacity(dark ? 0.28 : 0.12),
         ],
-        stops: const [0.0, 0.4, 0.7, 1.0],
-      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)));
+        stops: const [0.0, 0.38, 0.65, 1.0],
+      ).createShader(rect));
 
-    // 3. Яркий блик сверху — имитация преломления стекла
-    final specWidth  = size.width * 0.55;
-    final specHeight = size.height * 0.35;
-    final specRect   = Rect.fromLTWH((size.width - specWidth) / 2, 0, specWidth, specHeight);
-    canvas.drawRect(specRect, Paint()
+    // Верхний блик преломления (имитация стекла)
+    final specW = size.width  * 0.6;
+    final specH = size.height * 0.4;
+    final specR = Rect.fromLTWH((size.width - specW) / 2, 0, specW, specH);
+    canvas.drawRect(specR, Paint()
       ..shader = RadialGradient(
         center: Alignment.topCenter, radius: 1.0,
-        colors: [
-          Colors.white.withOpacity(dark ? 0.18 : 0.25),
-          Colors.white.withOpacity(0),
-        ],
-      ).createShader(specRect));
+        colors: [Colors.white.withOpacity(dark ? 0.2 : 0.28), Colors.white.withOpacity(0)],
+      ).createShader(specR));
 
-    // 4. Внутренняя тень снизу
+    // Нижняя тень
+    final shadowR = Rect.fromLTWH(0, size.height * 0.65, size.width, size.height * 0.35);
     canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        Rect.fromLTWH(0, size.height * 0.7, size.width, size.height * 0.3),
-        const Radius.circular(4),
-      ),
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topCenter, end: Alignment.bottomCenter,
-          colors: [Colors.black.withOpacity(0), Colors.black.withOpacity(dark ? 0.12 : 0.06)],
-        ).createShader(Rect.fromLTWH(0, size.height * 0.7, size.width, size.height * 0.3)),
+      RRect.fromRectAndCorners(shadowR, bottomLeft: br.bottomLeft, bottomRight: br.bottomRight),
+      Paint()..shader = LinearGradient(
+        begin: Alignment.topCenter, end: Alignment.bottomCenter,
+        colors: [Colors.black.withOpacity(0), Colors.black.withOpacity(dark ? 0.14 : 0.07)],
+      ).createShader(shadowR),
     );
   }
 
   @override bool shouldRepaint(_LiquidPainter o) =>
-      o.opacity != opacity || o.dark != dark;
+      o.opacity != opacity || o.dark != dark || o.base != base;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -344,60 +352,22 @@ class _MainScreenState extends State<MainScreen> {
   Future<void> _load() async {
     final p = await SharedPreferences.getInstance();
     final n = p.getString('nickname') ?? 'User';
-    setState(() {
-      _nick = n;
-      _nickCtrl.text = n;
-      _chats = (p.getStringList('chats') ?? []).map(ChatEntry.from).toList();
-    });
+    setState(() { _nick = n; _nickCtrl.text = n; _chats = (p.getStringList('chats') ?? []).map(ChatEntry.from).toList(); });
   }
 
   Future<void> _saveChats() async =>
-      (await SharedPreferences.getInstance())
-          .setStringList('chats', _chats.map((e) => e.serialize()).toList());
+      (await SharedPreferences.getInstance()).setStringList('chats', _chats.map((e) => e.serialize()).toList());
 
-  // ── Аватар ───────────────────────────────────────────────────────────────
+  // ── Аватар через base64 ───────────────────────────────────────────────────
   Future<void> _pickAvatar() async {
-    final xf = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70);
-    if (xf == null) return;
-    if (!mounted) return;
-    _showUploadingSnack('Загружаем аватар...');
-    try {
-      final bytes = await xf.readAsBytes();
-      final ext   = xf.path.split('.').last.toLowerCase();
-      final path  = 'avatars/$_nick.$ext';
-      await _sb.storage.from('media').uploadBinary(
-        path, bytes,
-        fileOptions: FileOptions(contentType: 'image/$ext', upsert: true),
-      );
-      final url = _sb.storage.from('media').getPublicUrl(path);
-      await _s.setAvatarUrl(url);
-      if (mounted) ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    } catch (e) {
-      if (mounted) _showErrSnack('Ошибка загрузки: $e');
-    }
+    final xf = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70, maxWidth: 200, maxHeight: 200);
+    if (xf == null || !mounted) return;
+    final bytes = await xf.readAsBytes();
+    await _s.setAvatarB64(base64Encode(bytes));
+    if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Аватар сохранён'), duration: Duration(seconds: 2)));
   }
 
-  void _showUploadingSnack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Row(children: [
-        const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
-        const SizedBox(width: 12),
-        Text(msg),
-      ]),
-      duration: const Duration(seconds: 30),
-    ));
-  }
-
-  void _showErrSnack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg), backgroundColor: Colors.red.shade800,
-      duration: const Duration(seconds: 5),
-    ));
-  }
-
-  // ── Добавить / редактировать чат ─────────────────────────────────────────
   void _showChatSheet({ChatEntry? existing, int? index}) {
     final idCtrl  = TextEditingController(text: existing?.id  ?? '');
     final keyCtrl = TextEditingController(text: existing?.key ?? '');
@@ -411,18 +381,11 @@ class _MainScreenState extends State<MainScreen> {
           Text(isEdit ? 'Редактировать' : 'Новый чат',
               style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white)),
           if (isEdit) GestureDetector(
-            onTap: () async {
-              Navigator.pop(ctx);
-              _chats.removeAt(index!);
-              await _saveChats(); setState(() {});
-            },
+            onTap: () async { Navigator.pop(ctx); _chats.removeAt(index!); await _saveChats(); setState(() {}); },
             child: Container(
               padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.red.withOpacity(0.18),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.red.withOpacity(0.4)),
-              ),
+              decoration: BoxDecoration(color: Colors.red.withOpacity(0.18), borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.red.withOpacity(0.4))),
               child: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
             ),
           ),
@@ -434,17 +397,20 @@ class _MainScreenState extends State<MainScreen> {
         _GlassField(controller: idCtrl, hint: 'ID чата', icon: Icons.tag, readOnly: isEdit),
         const SizedBox(height: 10),
         _GlassField(controller: keyCtrl, hint: 'Ключ шифрования (необязательно)', icon: Icons.key_outlined),
+        const SizedBox(height: 6),
+        Row(children: [
+          Icon(Icons.info_outline, size: 13, color: _s.accent.withOpacity(0.7)),
+          const SizedBox(width: 6),
+          Expanded(child: Text('Без ключа — сообщения хранятся открыто',
+              style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.35)))),
+        ]),
         const SizedBox(height: 18),
         SizedBox(width: double.infinity, height: 50,
           child: _GlassBtn(color: _s.accent, onTap: () async {
             final id = idCtrl.text.trim();
             if (id.isEmpty) return;
             final entry = ChatEntry(id, keyCtrl.text.trim());
-            if (isEdit) {
-              _chats[index!] = entry;
-            } else {
-              if (!_chats.any((e) => e.id == id)) _chats.add(entry);
-            }
+            if (isEdit) { _chats[index!] = entry; } else { if (!_chats.any((e) => e.id == id)) _chats.add(entry); }
             await _saveChats(); setState(() {});
             if (ctx.mounted) Navigator.pop(ctx);
           },
@@ -469,28 +435,25 @@ class _MainScreenState extends State<MainScreen> {
       bottomNavigationBar: Padding(
         padding: EdgeInsets.fromLTRB(20, 0, 20, MediaQuery.of(context).padding.bottom + 12),
         child: LiquidGlass(
-          blur: _s.glassBlur, opacity: dark ? 0.22 : 0.55,
-          radius: BorderRadius.circular(28),
+          blur: _s.glassBlur, opacity: dark ? 0.22 : 0.55, radius: BorderRadius.circular(28),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-              _NavItem(icon: Icons.forum_outlined,    label: 'Чаты',      selected: _tab == 0, onTap: () => setState(() => _tab = 0)),
+              _NavItem(icon: Icons.forum_outlined,   label: 'Чаты',      selected: _tab == 0, onTap: () => setState(() => _tab = 0)),
               GestureDetector(
                 onTap: _showChatSheet,
                 child: Container(
                   width: 52, height: 52,
                   decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [_s.accent, _s.accent.withOpacity(0.65)],
-                      begin: Alignment.topLeft, end: Alignment.bottomRight,
-                    ),
+                    gradient: LinearGradient(colors: [_s.accent, _s.accent.withOpacity(0.65)],
+                        begin: Alignment.topLeft, end: Alignment.bottomRight),
                     shape: BoxShape.circle,
                     boxShadow: [BoxShadow(color: _s.accent.withOpacity(0.45), blurRadius: 18, offset: const Offset(0, 4))],
                   ),
                   child: const Icon(Icons.edit_outlined, color: Colors.white, size: 22),
                 ),
               ),
-              _NavItem(icon: Icons.settings_outlined,  label: 'Настройки', selected: _tab == 1, onTap: () => setState(() => _tab = 1)),
+              _NavItem(icon: Icons.settings_outlined, label: 'Настройки', selected: _tab == 1, onTap: () => setState(() => _tab = 1)),
             ]),
           ),
         ),
@@ -498,7 +461,6 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
-  // ── Список чатов ─────────────────────────────────────────────────────────
   Widget _buildChats() {
     return CustomScrollView(slivers: [
       _glassAppBar('Meow', actions: [
@@ -506,7 +468,7 @@ class _MainScreenState extends State<MainScreen> {
           padding: const EdgeInsets.only(right: 14, top: 6),
           child: GestureDetector(
             onTap: () => setState(() => _tab = 1),
-            child: _AvatarWidget(nick: _nick, url: _s.avatarUrl, radius: 18),
+            child: _AvatarWidget(nick: _nick, b64: _s.avatarB64, radius: 18),
           ),
         ),
       ]),
@@ -530,21 +492,13 @@ class _MainScreenState extends State<MainScreen> {
                   key: Key(chat.serialize()),
                   direction: DismissDirection.endToStart,
                   background: Container(
-                    alignment: Alignment.centerRight,
-                    padding: const EdgeInsets.only(right: 24),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.7),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
+                    alignment: Alignment.centerRight, padding: const EdgeInsets.only(right: 24),
+                    decoration: BoxDecoration(color: Colors.red.withOpacity(0.7), borderRadius: BorderRadius.circular(20)),
                     child: const Icon(Icons.delete_outline, color: Colors.white),
                   ),
-                  onDismissed: (_) async {
-                    _chats.removeAt(i);
-                    await _saveChats(); setState(() {});
-                  },
+                  onDismissed: (_) async { _chats.removeAt(i); await _saveChats(); setState(() {}); },
                   child: LiquidGlass(
-                    blur: _s.glassBlur, opacity: 0.1,
-                    radius: BorderRadius.circular(20),
+                    blur: _s.glassBlur, opacity: 0.1, radius: BorderRadius.circular(20),
                     child: ListTile(
                       onTap: () => Navigator.push(context, MaterialPageRoute(
                         builder: (_) => ChatScreen(roomName: chat.id, encryptionKey: chat.key, myNick: _nick),
@@ -576,7 +530,6 @@ class _MainScreenState extends State<MainScreen> {
     ]);
   }
 
-  // ── Настройки ─────────────────────────────────────────────────────────────
   Widget _buildSettings() {
     return CustomScrollView(slivers: [
       _glassAppBar('Настройки'),
@@ -584,20 +537,16 @@ class _MainScreenState extends State<MainScreen> {
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
         sliver: SliverList(delegate: SliverChildListDelegate([
 
-          // Профиль + аватар
           _Sect('ПРОФИЛЬ', [
             Padding(padding: const EdgeInsets.all(16), child: Column(children: [
-              // Аватар
               GestureDetector(
                 onTap: _pickAvatar,
                 child: Stack(alignment: Alignment.bottomRight, children: [
-                  _AvatarWidget(nick: _nick, url: _s.avatarUrl, radius: 38),
+                  _AvatarWidget(nick: _nick, b64: _s.avatarB64, radius: 38),
                   Container(
                     padding: const EdgeInsets.all(5),
-                    decoration: BoxDecoration(
-                      color: _s.accent, shape: BoxShape.circle,
-                      border: Border.all(color: Colors.black26, width: 1.5),
-                    ),
+                    decoration: BoxDecoration(color: _s.accent, shape: BoxShape.circle,
+                        border: Border.all(color: Colors.black26, width: 1.5)),
                     child: const Icon(Icons.camera_alt_outlined, color: Colors.white, size: 14),
                   ),
                 ]),
@@ -606,28 +555,22 @@ class _MainScreenState extends State<MainScreen> {
               Row(children: [
                 Expanded(child: _GlassField(controller: _nickCtrl, hint: 'Твоё имя', icon: Icons.person_outline)),
                 const SizedBox(width: 10),
-                _GlassBtn(
-                  color: _s.accent,
-                  onTap: () async {
-                    final n = _nickCtrl.text.trim();
-                    if (n.isEmpty) return;
-                    (await SharedPreferences.getInstance()).setString('nickname', n);
-                    setState(() => _nick = n);
-                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                _GlassBtn(color: _s.accent, onTap: () async {
+                  final n = _nickCtrl.text.trim();
+                  if (n.isEmpty) return;
+                  (await SharedPreferences.getInstance()).setString('nickname', n);
+                  setState(() => _nick = n);
+                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Сохранено'), duration: Duration(seconds: 2)));
-                  },
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                    child: Text('OK', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-                  ),
-                ),
+                },
+                child: const Padding(padding: EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                  child: Text('OK', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)))),
               ]),
             ])),
           ]),
 
           const SizedBox(height: 16),
 
-          // Тема
           _Sect('ТЕМА', [
             _GlassSwitch(
               label: 'Тёмная тема',
@@ -638,7 +581,6 @@ class _MainScreenState extends State<MainScreen> {
 
           const SizedBox(height: 16),
 
-          // Акцент
           _Sect('ЦВЕТ АКЦЕНТА', [
             Padding(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
               child: StatefulBuilder(builder: (_, ss) => Row(
@@ -665,7 +607,6 @@ class _MainScreenState extends State<MainScreen> {
 
           const SizedBox(height: 16),
 
-          // Liquid Glass
           _Sect('LIQUID GLASS', [
             Padding(padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
               child: StatefulBuilder(builder: (_, ss) => Column(children: [
@@ -685,7 +626,6 @@ class _MainScreenState extends State<MainScreen> {
 
           const SizedBox(height: 16),
 
-          // Размер шрифта
           _Sect('РАЗМЕР ТЕКСТА', [
             Padding(padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
               child: StatefulBuilder(builder: (_, ss) => Column(children: [
@@ -722,8 +662,7 @@ class _MainScreenState extends State<MainScreen> {
 
           GestureDetector(
             onTap: () async {
-              final ok = await showDialog<bool>(
-                context: context,
+              final ok = await showDialog<bool>(context: context,
                 builder: (ctx) => AlertDialog(
                   backgroundColor: const Color(0xFF1C1C2E),
                   title: const Text('Очистить все чаты?', style: TextStyle(color: Colors.white)),
@@ -735,10 +674,7 @@ class _MainScreenState extends State<MainScreen> {
                   ],
                 ),
               );
-              if (ok == true) {
-                (await SharedPreferences.getInstance()).remove('chats');
-                setState(() { _chats = []; _tab = 0; });
-              }
+              if (ok == true) { (await SharedPreferences.getInstance()).remove('chats'); setState(() { _chats = []; _tab = 0; }); }
             },
             child: LiquidGlass(radius: BorderRadius.circular(16), tint: Colors.red, opacity: 0.08,
               child: const Padding(padding: EdgeInsets.symmetric(vertical: 16),
@@ -777,9 +713,7 @@ class _MainScreenState extends State<MainScreen> {
 //  ЭКРАН ЧАТА
 // ════════════════════════════════════════════════════════════════════════════
 class ChatScreen extends StatefulWidget {
-  final String roomName;
-  final String encryptionKey;
-  final String myNick;
+  final String roomName, encryptionKey, myNick;
   const ChatScreen({super.key, required this.roomName, required this.encryptionKey, required this.myNick});
   @override State<ChatScreen> createState() => _ChatScreenState();
 }
@@ -788,6 +722,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _s      = AppSettings.instance;
   final _ctrl   = TextEditingController();
   final _scroll = ScrollController();
+  final _focus  = FocusNode();
   bool  _hasTxt    = false;
   bool  _uploading = false;
 
@@ -802,14 +737,21 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   @override
-  void dispose() { _s.removeListener(_r); _ctrl.dispose(); _scroll.dispose(); super.dispose(); }
+  void dispose() {
+    _s.removeListener(_r);
+    _ctrl.dispose();
+    _scroll.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
   void _r() => setState(() {});
 
-  // ── Отправить текст ───────────────────────────────────────────────────────
   Future<void> _sendText() async {
     final text = _ctrl.text.trim();
     if (text.isEmpty) return;
     _ctrl.clear();
+    _focus.requestFocus(); // остаёмся в поле ввода после Enter
     try {
       await _sb.from('messages').insert({
         'sender':    widget.myNick,
@@ -819,42 +761,61 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     } catch (e) {
       _ctrl.text = text;
-      _showErr('Ошибка: $e');
+      _showErr('Ошибка отправки: $e');
     }
   }
 
-  // ── Отправить медиа ───────────────────────────────────────────────────────
-  Future<void> _pickAndSend(bool isVideo) async {
-    final xf = isVideo
-        ? await _picker.pickVideo(source: ImageSource.gallery)
-        : await _picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
+  // ── Отправить фото как base64 ─────────────────────────────────────────────
+  Future<void> _pickAndSendImage({ImageSource source = ImageSource.gallery}) async {
+    final xf = await _picker.pickImage(source: source, imageQuality: 70, maxWidth: 900, maxHeight: 900);
     if (xf == null) return;
     setState(() => _uploading = true);
     try {
-      final bytes = await xf.readAsBytes();
-      final ext   = xf.path.split('.').last.toLowerCase();
-      final path  = 'chat_media/${widget.roomName}/${_uid()}.$ext';
-      await _sb.storage.from('media').uploadBinary(
-        path, bytes,
-        fileOptions: FileOptions(
-          contentType: isVideo ? 'video/$ext' : 'image/$ext', upsert: false),
-      );
-      final url = _sb.storage.from('media').getPublicUrl(path);
+      final bytes  = await xf.readAsBytes();
+      final b64    = base64Encode(bytes);
+      // Проверка размера — base64 не должен быть огромным
+      if (b64.length > 800 * 1024) { // >800KB base64 ≈ >600KB файл
+        _showErr('Файл слишком большой. Выбери фото меньшего размера.');
+        return;
+      }
       await _sb.from('messages').insert({
         'sender':    widget.myNick,
         'chat_key':  widget.roomName,
-        'payload':   '',
-        'file_url':  url,
-        'file_type': isVideo ? 'video' : 'image',
+        'payload':   b64,
+        'file_type': 'image',
       });
     } catch (e) {
-      _showErr('Ошибка загрузки: $e');
+      _showErr('Ошибка: $e');
     } finally {
       if (mounted) setState(() => _uploading = false);
     }
   }
 
-  // ── Прикрепить (показать выбор фото/видео) ────────────────────────────────
+  // ── Отправить видео как base64 ────────────────────────────────────────────
+  Future<void> _pickAndSendVideo() async {
+    final xf = await _picker.pickVideo(source: ImageSource.gallery, maxDuration: const Duration(seconds: 30));
+    if (xf == null) return;
+    setState(() => _uploading = true);
+    try {
+      final bytes = await xf.readAsBytes();
+      if (bytes.length > 10 * 1024 * 1024) { // >10MB
+        _showErr('Видео слишком большое (макс. 10MB). Обрежь его.');
+        return;
+      }
+      final b64 = base64Encode(bytes);
+      await _sb.from('messages').insert({
+        'sender':    widget.myNick,
+        'chat_key':  widget.roomName,
+        'payload':   b64,
+        'file_type': 'video',
+      });
+    } catch (e) {
+      _showErr('Ошибка: $e');
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
   void _showAttach() {
     showModalBottomSheet(
       context: context, backgroundColor: Colors.transparent,
@@ -863,29 +824,9 @@ class _ChatScreenState extends State<ChatScreen> {
         const Text('Прикрепить', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white)),
         const SizedBox(height: 16),
         Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-          _AttachBtn(icon: Icons.image_outlined, label: 'Фото', onTap: () { Navigator.pop(context); _pickAndSend(false); }),
-          _AttachBtn(icon: Icons.videocam_outlined, label: 'Видео', onTap: () { Navigator.pop(context); _pickAndSend(true); }),
-          _AttachBtn(icon: Icons.camera_alt_outlined, label: 'Камера', onTap: () async {
-            Navigator.pop(context);
-            final xf = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
-            if (xf != null) {
-              // upload как image
-              setState(() => _uploading = true);
-              try {
-                final bytes = await xf.readAsBytes();
-                final ext = xf.path.split('.').last.toLowerCase();
-                final path = 'chat_media/${widget.roomName}/${_uid()}.$ext';
-                await _sb.storage.from('media').uploadBinary(path, bytes,
-                    fileOptions: FileOptions(contentType: 'image/$ext', upsert: false));
-                final url = _sb.storage.from('media').getPublicUrl(path);
-                await _sb.from('messages').insert({
-                  'sender': widget.myNick, 'chat_key': widget.roomName,
-                  'payload': '', 'file_url': url, 'file_type': 'image',
-                });
-              } catch (e) { _showErr('Ошибка: $e'); }
-              finally { if (mounted) setState(() => _uploading = false); }
-            }
-          }),
+          _AttachBtn(icon: Icons.image_outlined, label: 'Фото', onTap: () { Navigator.pop(context); _pickAndSendImage(); }),
+          _AttachBtn(icon: Icons.videocam_outlined, label: 'Видео', onTap: () { Navigator.pop(context); _pickAndSendVideo(); }),
+          _AttachBtn(icon: Icons.camera_alt_outlined, label: 'Камера', onTap: () { Navigator.pop(context); _pickAndSendImage(source: ImageSource.camera); }),
         ]),
         const SizedBox(height: 8),
       ])),
@@ -896,6 +837,19 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(msg), backgroundColor: Colors.red.shade800, duration: const Duration(seconds: 5)));
+  }
+
+  // ── Обработка нажатий клавиш (Enter для отправки на ПК) ──────────────────
+  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.enter &&
+        !HardwareKeyboard.instance.isShiftPressed &&
+        !HardwareKeyboard.instance.isControlPressed) {
+      // Enter без Shift → отправить. Shift+Enter → новая строка
+      _sendText();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   @override
@@ -910,8 +864,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final bg   = dark ? const Color(0xFF080810) : const Color(0xFFF0F0F7);
 
     return Scaffold(
-      extendBodyBehindAppBar: true, extendBody: true,
-      backgroundColor: bg,
+      extendBodyBehindAppBar: true, extendBody: true, backgroundColor: bg,
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(60),
         child: ClipRect(
@@ -934,7 +887,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Stack(children: [
         _BgGlow(color: _s.accent, intensity: 0.25),
-        _BgPainter2(_s.chatBg, _s.accent),
+        _BgPattern(_s.chatBg, _s.accent),
         Column(children: [
           Expanded(
             child: StreamBuilder<List<Map<String, dynamic>>>(
@@ -955,21 +908,34 @@ class _ChatScreenState extends State<ChatScreen> {
                   padding: EdgeInsets.fromLTRB(10, MediaQuery.of(ctx).padding.top + 70, 10, 90),
                   itemCount: msgs.length,
                   itemBuilder: (_, i) {
-                    final m      = msgs[i];
-                    final sender = (m['sender'] as String?) ?? '?';
-                    final isMe   = sender == widget.myNick;
-                    final ftype  = (m['file_type'] as String?) ?? 'text';
+                    final m       = msgs[i];
+                    final sender  = (m['sender'] as String?) ?? '?';
+                    final isMe    = sender == widget.myNick;
+                    final ftype   = (m['file_type'] as String?) ?? 'text';
                     final payload = (m['payload'] as String?) ?? '';
-                    final fileUrl = (m['file_url'] as String?) ?? '';
-                    final text   = ftype == 'text' ? _decrypt(payload, widget.encryptionKey) : payload;
                     final showNick = !isMe && (i == msgs.length - 1 || msgs[i + 1]['sender'] != sender);
                     String time = '';
                     if (m['created_at'] != null) {
                       time = DateTime.parse(m['created_at']).toLocal().toString().substring(11, 16);
                     }
+
+                    // Для текста — расшифровываем
+                    String displayText = payload;
+                    bool   isEncFailed  = false;
+                    if (ftype == 'text') {
+                      final dec = _tryDecrypt(payload, widget.encryptionKey);
+                      if (dec == null) {
+                        displayText = '🔒 Зашифровано (неверный ключ)';
+                        isEncFailed  = true;
+                      } else {
+                        displayText = dec;
+                      }
+                    }
+
                     return _Bubble(
-                      text: text, sender: sender, time: time, fileUrl: fileUrl, fileType: ftype,
-                      isMe: isMe, showNick: showNick,
+                      text: displayText, sender: sender, time: time,
+                      fileType: ftype, b64payload: ftype != 'text' ? payload : '',
+                      isMe: isMe, showNick: showNick, isEncFailed: isEncFailed,
                       style: _s.bubbleStyle, fontSize: _s.fontSize,
                       accent: _s.accent, dark: dark, glassBlur: _s.glassBlur,
                     );
@@ -979,36 +945,54 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
 
-          // ── Liquid glass поле ввода ───────────────────────────────────
+          // ── Поле ввода — Enter на ПК отправляет ─────────────────────────
           Padding(
             padding: EdgeInsets.fromLTRB(10, 6, 10, MediaQuery.of(context).padding.bottom + 10),
             child: LiquidGlass(
-              blur: _s.glassBlur, opacity: _s.glassOpacity * 1.6,
-              radius: BorderRadius.circular(28),
+              blur: _s.glassBlur, opacity: _s.glassOpacity * 1.6, radius: BorderRadius.circular(28),
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                  // Кнопка прикрепить
                   GestureDetector(
-                    onTap: _showAttach,
+                    onTap: _uploading ? null : _showAttach,
                     child: Padding(
                       padding: const EdgeInsets.only(bottom: 8, right: 4),
-                      child: Icon(_uploading ? Icons.hourglass_bottom : Icons.add_circle_outline,
-                          color: _uploading ? _s.accent : Colors.white.withOpacity(0.45), size: 24),
+                      child: _uploading
+                          ? SizedBox(width: 24, height: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: _s.accent))
+                          : Icon(Icons.add_circle_outline, color: Colors.white.withOpacity(0.45), size: 24),
                     ),
                   ),
-                  Expanded(child: TextField(
-                    controller: _ctrl, maxLines: 5, minLines: 1,
-                    textInputAction: TextInputAction.newline,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      hintText: 'Сообщение...',
-                      hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
-                      border: InputBorder.none, focusedBorder: InputBorder.none,
-                      enabledBorder: InputBorder.none, fillColor: Colors.transparent,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                  Expanded(
+                    child: KeyboardListener(
+                      focusNode: FocusNode(), // отдельный нод для KeyboardListener
+                      onKeyEvent: (event) {
+                        if (event is KeyDownEvent &&
+                            event.logicalKey == LogicalKeyboardKey.enter &&
+                            !HardwareKeyboard.instance.isShiftPressed) {
+                          _sendText();
+                        }
+                      },
+                      child: TextField(
+                        controller: _ctrl,
+                        focusNode: _focus,
+                        maxLines: Platform.isAndroid || Platform.isIOS ? 5 : 1, // на ПК одна строка (Enter отправляет)
+                        minLines: 1,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => _sendText(), // для мобильных клавиатур
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: Platform.isAndroid || Platform.isIOS
+                              ? 'Сообщение...'
+                              : 'Сообщение... (Enter — отправить, Shift+Enter — новая строка)',
+                          hintStyle: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 13),
+                          border: InputBorder.none, focusedBorder: InputBorder.none,
+                          enabledBorder: InputBorder.none, fillColor: Colors.transparent,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                        ),
+                      ),
                     ),
-                  )),
+                  ),
                   const SizedBox(width: 6),
                   AnimatedSwitcher(
                     duration: const Duration(milliseconds: 180),
@@ -1017,13 +1001,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         ? GestureDetector(
                             key: const ValueKey('send'), onTap: _sendText,
                             child: Container(
-                              width: 40, height: 40,
-                              margin: const EdgeInsets.only(bottom: 2),
+                              width: 40, height: 40, margin: const EdgeInsets.only(bottom: 2),
                               decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  colors: [_s.accent, _s.accent.withOpacity(0.65)],
-                                  begin: Alignment.topLeft, end: Alignment.bottomRight,
-                                ),
+                                gradient: LinearGradient(colors: [_s.accent, _s.accent.withOpacity(0.65)],
+                                    begin: Alignment.topLeft, end: Alignment.bottomRight),
                                 shape: BoxShape.circle,
                                 boxShadow: [BoxShadow(color: _s.accent.withOpacity(0.4), blurRadius: 10)],
                               ),
@@ -1046,17 +1027,18 @@ class _ChatScreenState extends State<ChatScreen> {
 //  ПУЗЫРЬ
 // ════════════════════════════════════════════════════════════════════════════
 class _Bubble extends StatelessWidget {
-  final String text, sender, time, fileUrl, fileType;
-  final bool isMe, showNick, dark;
-  final int style;
+  final String text, sender, time, fileType, b64payload;
+  final bool   isMe, showNick, dark, isEncFailed;
+  final int    style;
   final double fontSize, glassBlur;
-  final Color accent;
+  final Color  accent;
 
   const _Bubble({
     required this.text, required this.sender, required this.time,
-    required this.fileUrl, required this.fileType,
-    required this.isMe, required this.showNick, required this.style,
-    required this.fontSize, required this.accent, required this.dark, required this.glassBlur,
+    required this.fileType, required this.b64payload,
+    required this.isMe, required this.showNick, required this.dark,
+    required this.isEncFailed, required this.style, required this.fontSize,
+    required this.accent, required this.glassBlur,
   });
 
   BorderRadius _r() {
@@ -1080,14 +1062,14 @@ class _Bubble extends StatelessWidget {
       context: ctx, backgroundColor: Colors.transparent,
       builder: (_) => _GlassSheet(child: Column(mainAxisSize: MainAxisSize.min, children: [
         _sheetHandle(),
-        if (text.isNotEmpty) ListTile(
+        if (!isEncFailed && fileType == 'text') ListTile(
           leading: const Icon(Icons.copy_outlined, color: Colors.white70),
           title: const Text('Копировать', style: TextStyle(color: Colors.white)),
           onTap: () {
             Clipboard.setData(ClipboardData(text: text));
             Navigator.pop(ctx);
-            ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
-                content: Text('Скопировано'), duration: Duration(seconds: 2)));
+            ScaffoldMessenger.of(ctx).showSnackBar(
+                const SnackBar(content: Text('Скопировано'), duration: Duration(seconds: 2)));
           },
         ),
         ...urls.map((url) => ListTile(
@@ -1101,39 +1083,35 @@ class _Bubble extends StatelessWidget {
   }
 
   Widget _buildContent(BuildContext ctx) {
-    if (fileType == 'image' && fileUrl.isNotEmpty) {
-      return GestureDetector(
-        onTap: () => Navigator.push(ctx, MaterialPageRoute(
-          builder: (_) => _FullImageScreen(url: fileUrl),
-        )),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: CachedNetworkImage(
-            imageUrl: fileUrl,
-            width: 220, fit: BoxFit.cover,
-            placeholder: (_, __) => Container(
-              width: 220, height: 140,
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Center(child: CircularProgressIndicator(color: accent, strokeWidth: 2)),
-            ),
-            errorWidget: (_, __, ___) => Container(
-              width: 220, height: 60,
-              alignment: Alignment.center,
-              child: const Icon(Icons.broken_image_outlined, color: Colors.white38),
-            ),
+    // Изображение из base64
+    if (fileType == 'image' && b64payload.isNotEmpty) {
+      try {
+        final bytes = base64Decode(b64payload);
+        return GestureDetector(
+          onTap: () => Navigator.push(ctx, MaterialPageRoute(
+            builder: (_) => _FullImageScreen(bytes: bytes),
+          )),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Image.memory(bytes, width: 220, fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const _MediaError(icon: Icons.broken_image_outlined)),
           ),
-        ),
-      );
+        );
+      } catch (_) {
+        return const _MediaError(icon: Icons.broken_image_outlined);
+      }
     }
 
-    if (fileType == 'video' && fileUrl.isNotEmpty) {
-      return _VideoMessage(url: fileUrl);
+    // Видео из base64
+    if (fileType == 'video' && b64payload.isNotEmpty) {
+      return _VideoFromB64(b64: b64payload);
     }
 
     // Текст с ссылками
+    if (isEncFailed) {
+      return Text(text, style: TextStyle(
+        color: Colors.white.withOpacity(0.5), fontSize: fontSize, fontStyle: FontStyle.italic));
+    }
     final matches = _urlRegex.allMatches(text).toList();
     if (matches.isEmpty) {
       return Text(text, style: TextStyle(color: Colors.white, fontSize: fontSize, height: 1.35));
@@ -1146,11 +1124,8 @@ class _Bubble extends StatelessWidget {
       spans.add(WidgetSpan(child: GestureDetector(
         onTap: () => _openUrl(url),
         child: Text(url, style: TextStyle(
-          fontSize: fontSize, height: 1.35,
-          color: Colors.lightBlueAccent,
-          decoration: TextDecoration.underline,
-          decorationColor: Colors.lightBlueAccent,
-        )),
+          fontSize: fontSize, height: 1.35, color: Colors.lightBlueAccent,
+          decoration: TextDecoration.underline, decorationColor: Colors.lightBlueAccent)),
       )));
       last = m.end;
     }
@@ -1163,7 +1138,7 @@ class _Bubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final br = _r();
+    final br      = _r();
     final isMedia = fileType == 'image' || fileType == 'video';
 
     return Padding(
@@ -1174,9 +1149,7 @@ class _Bubble extends StatelessWidget {
         children: [
           if (!isMe) Padding(
             padding: const EdgeInsets.only(right: 6, bottom: 2),
-            child: showNick
-                ? _AvatarWidget(nick: sender, radius: 14)
-                : const SizedBox(width: 28),
+            child: showNick ? _AvatarWidget(nick: sender, radius: 14) : const SizedBox(width: 28),
           ),
           Flexible(
             child: GestureDetector(
@@ -1188,16 +1161,12 @@ class _Bubble extends StatelessWidget {
                   child: CustomPaint(
                     painter: _LiquidPainter(br,
                       isMe ? 0.0 : (dark ? 0.1 : 0.55),
-                      isMe ? accent : (dark ? Colors.white : Colors.black),
-                      dark),
+                      isMe ? accent : (dark ? Colors.white : Colors.black), dark),
                     child: Container(
                       constraints: BoxConstraints(maxWidth: isMedia ? 240 : MediaQuery.of(context).size.width * 0.72),
                       margin: EdgeInsets.only(left: isMe ? 52 : 0, right: isMe ? 0 : 52),
                       padding: EdgeInsets.all(isMedia ? 6 : 10),
-                      decoration: isMe ? BoxDecoration(
-                        borderRadius: br,
-                        color: accent.withOpacity(0.7),
-                      ) : null,
+                      decoration: isMe ? BoxDecoration(borderRadius: br, color: accent.withOpacity(0.72)) : null,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
@@ -1208,19 +1177,13 @@ class _Bubble extends StatelessWidget {
                                 color: _avatarColor(sender), fontSize: 12, fontWeight: FontWeight.w700)),
                           ),
                           _buildContent(context),
-                          if (!isMedia) ...[
-                            const SizedBox(height: 3),
-                            Align(alignment: Alignment.bottomRight,
-                              child: Text(time, style: TextStyle(
-                                  color: Colors.white.withOpacity(0.5), fontSize: 10))),
-                          ] else
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4, right: 4),
-                              child: Align(alignment: Alignment.bottomRight,
-                                child: Text(time, style: TextStyle(
-                                    color: Colors.white.withOpacity(0.7), fontSize: 10,
-                                    shadows: [const Shadow(color: Colors.black54, blurRadius: 4)]))),
-                            ),
+                          SizedBox(height: isMedia ? 4 : 3),
+                          Align(alignment: Alignment.bottomRight,
+                            child: Text(time, style: TextStyle(
+                              color: Colors.white.withOpacity(isMedia ? 0.7 : 0.5),
+                              fontSize: 10,
+                              shadows: isMedia ? [const Shadow(color: Colors.black54, blurRadius: 4)] : null,
+                            ))),
                         ],
                       ),
                     ),
@@ -1236,51 +1199,68 @@ class _Bubble extends StatelessWidget {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  ВИДЕО СООБЩЕНИЕ
+//  ВИДЕО ИЗ BASE64 — сохраняет во временный файл и воспроизводит
 // ════════════════════════════════════════════════════════════════════════════
-class _VideoMessage extends StatefulWidget {
-  final String url;
-  const _VideoMessage({required this.url});
-  @override State<_VideoMessage> createState() => _VideoMessageState();
+class _VideoFromB64 extends StatefulWidget {
+  final String b64;
+  const _VideoFromB64({required this.b64});
+  @override State<_VideoFromB64> createState() => _VideoFromB64State();
 }
 
-class _VideoMessageState extends State<_VideoMessage> {
-  late final VideoPlayerController _vc;
+class _VideoFromB64State extends State<_VideoFromB64> {
+  VideoPlayerController? _vc;
+  String? _tmpPath;
   bool _init = false;
+  String? _err;
 
   @override
   void initState() {
     super.initState();
-    _vc = VideoPlayerController.networkUrl(Uri.parse(widget.url))
-      ..initialize().then((_) { if (mounted) setState(() => _init = true); });
+    _prepare();
+  }
+
+  Future<void> _prepare() async {
+    try {
+      final bytes = base64Decode(widget.b64);
+      final dir   = Directory.systemTemp;
+      final path  = '${dir.path}/meow_vid_${widget.b64.hashCode}.mp4';
+      final file  = File(path);
+      if (!await file.exists()) await file.writeAsBytes(bytes);
+      _tmpPath = path;
+      final vc = VideoPlayerController.file(file);
+      await vc.initialize();
+      if (mounted) setState(() { _vc = vc; _init = true; });
+    } catch (e) {
+      if (mounted) setState(() => _err = 'Ошибка видео');
+    }
   }
 
   @override
-  void dispose() { _vc.dispose(); super.dispose(); }
+  void dispose() { _vc?.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
+    if (_err != null) return _MediaError(label: _err!, icon: Icons.videocam_off_outlined);
     if (!_init) return Container(
       width: 220, height: 130,
       decoration: BoxDecoration(color: Colors.white.withOpacity(0.08), borderRadius: BorderRadius.circular(12)),
       child: const Center(child: CircularProgressIndicator(color: Colors.white54, strokeWidth: 2)),
     );
-
     return GestureDetector(
       onTap: () => Navigator.push(context, MaterialPageRoute(
-        builder: (_) => _FullVideoScreen(url: widget.url),
+        builder: (_) => _FullVideoScreen(controller: _vc!),
       )),
       child: Stack(alignment: Alignment.center, children: [
         ClipRRect(
           borderRadius: BorderRadius.circular(12),
           child: AspectRatio(
-            aspectRatio: _vc.value.aspectRatio.clamp(0.5, 2.0),
-            child: VideoPlayer(_vc),
+            aspectRatio: _vc!.value.aspectRatio.clamp(0.5, 2.5),
+            child: VideoPlayer(_vc!),
           ),
         ),
         Container(
           padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(color: Colors.black38, shape: BoxShape.circle),
+          decoration: const BoxDecoration(color: Colors.black38, shape: BoxShape.circle),
           child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 28),
         ),
       ]),
@@ -1292,17 +1272,14 @@ class _VideoMessageState extends State<_VideoMessage> {
 //  ПОЛНОЭКРАННОЕ ФОТО
 // ════════════════════════════════════════════════════════════════════════════
 class _FullImageScreen extends StatelessWidget {
-  final String url;
-  const _FullImageScreen({required this.url});
+  final Uint8List bytes;
+  const _FullImageScreen({required this.bytes});
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: Colors.black,
     body: GestureDetector(
       onTap: () => Navigator.pop(context),
-      child: Center(child: Hero(
-        tag: url,
-        child: CachedNetworkImage(imageUrl: url, fit: BoxFit.contain),
-      )),
+      child: Center(child: Image.memory(bytes, fit: BoxFit.contain)),
     ),
   );
 }
@@ -1311,74 +1288,66 @@ class _FullImageScreen extends StatelessWidget {
 //  ПОЛНОЭКРАННОЕ ВИДЕО
 // ════════════════════════════════════════════════════════════════════════════
 class _FullVideoScreen extends StatefulWidget {
-  final String url;
-  const _FullVideoScreen({required this.url});
+  final VideoPlayerController controller;
+  const _FullVideoScreen({required this.controller});
   @override State<_FullVideoScreen> createState() => _FullVideoScreenState();
 }
 
 class _FullVideoScreenState extends State<_FullVideoScreen> {
-  late final VideoPlayerController _vc;
-  bool _init = false;
-
   @override
-  void initState() {
-    super.initState();
-    _vc = VideoPlayerController.networkUrl(Uri.parse(widget.url))
-      ..initialize().then((_) {
-        if (mounted) { setState(() => _init = true); _vc.play(); }
-      });
-  }
-
-  @override void dispose() { _vc.dispose(); super.dispose(); }
+  void initState() { super.initState(); widget.controller.play(); widget.controller.addListener(_r); }
+  @override
+  void dispose() { widget.controller.removeListener(_r); widget.controller.pause(); super.dispose(); }
+  void _r() => setState(() {});
 
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: Colors.black,
     body: GestureDetector(
-      onTap: () { if (_vc.value.isPlaying) { _vc.pause(); } else { _vc.play(); } },
+      onTap: () { widget.controller.value.isPlaying ? widget.controller.pause() : widget.controller.play(); },
       child: Stack(children: [
-        if (_init) Center(child: AspectRatio(aspectRatio: _vc.value.aspectRatio, child: VideoPlayer(_vc)))
-        else const Center(child: CircularProgressIndicator(color: Colors.white)),
+        Center(child: AspectRatio(
+          aspectRatio: widget.controller.value.aspectRatio,
+          child: VideoPlayer(widget.controller),
+        )),
         SafeArea(child: Padding(
           padding: const EdgeInsets.all(8),
           child: IconButton(icon: const Icon(Icons.close, color: Colors.white),
               onPressed: () => Navigator.pop(context)),
         )),
-        if (_init) Positioned(bottom: 40, left: 0, right: 0,
-          child: Center(child: VideoProgressIndicator(_vc,
-              allowScrubbing: true,
-              colors: VideoProgressColors(
-                playedColor: AppSettings.instance.accent,
-                bufferedColor: Colors.white30, backgroundColor: Colors.white12)))),
+        Positioned(bottom: 40, left: 20, right: 20,
+          child: VideoProgressIndicator(widget.controller,
+            allowScrubbing: true,
+            colors: VideoProgressColors(
+              playedColor: AppSettings.instance.accent,
+              bufferedColor: Colors.white30, backgroundColor: Colors.white12))),
       ]),
     ),
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  ВИДЖЕТ АВАТАРА
+//  АВАТАР — из base64 или по первой букве
 // ════════════════════════════════════════════════════════════════════════════
 class _AvatarWidget extends StatelessWidget {
   final String  nick;
   final double  radius;
-  final String? url;
-  const _AvatarWidget({required this.nick, required this.radius, this.url});
+  final String? b64;
+  const _AvatarWidget({required this.nick, required this.radius, this.b64});
 
   @override
   Widget build(BuildContext context) {
-    if (url != null && url!.isNotEmpty) {
-      return CircleAvatar(
-        radius: radius,
-        backgroundImage: CachedNetworkImageProvider(url!),
-        backgroundColor: _avatarColor(nick).withOpacity(0.25),
-      );
+    if (b64 != null && b64!.isNotEmpty) {
+      try {
+        final bytes = base64Decode(b64!);
+        return CircleAvatar(radius: radius, backgroundImage: MemoryImage(bytes));
+      } catch (_) {}
     }
     return CircleAvatar(
       radius: radius,
       backgroundColor: _avatarColor(nick).withOpacity(0.25),
       child: Text(nick.isNotEmpty ? nick[0].toUpperCase() : '?',
-          style: TextStyle(color: _avatarColor(nick), fontWeight: FontWeight.w800,
-              fontSize: radius * 0.7)),
+          style: TextStyle(color: _avatarColor(nick), fontWeight: FontWeight.w800, fontSize: radius * 0.75)),
     );
   }
 }
@@ -1386,6 +1355,19 @@ class _AvatarWidget extends StatelessWidget {
 // ════════════════════════════════════════════════════════════════════════════
 //  ВСПОМОГАТЕЛЬНЫЕ ВИДЖЕТЫ
 // ════════════════════════════════════════════════════════════════════════════
+class _MediaError extends StatelessWidget {
+  final IconData icon;
+  final String?  label;
+  const _MediaError({required this.icon, this.label});
+  @override Widget build(BuildContext context) => Container(
+    width: 200, height: 60, alignment: Alignment.center,
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icon, color: Colors.white38, size: 22),
+      if (label != null) ...[const SizedBox(width: 6), Text(label!, style: const TextStyle(color: Colors.white38, fontSize: 12))],
+    ]),
+  );
+}
+
 Widget _sheetHandle() => Center(child: Container(
   width: 36, height: 4, margin: const EdgeInsets.only(bottom: 18),
   decoration: BoxDecoration(color: Colors.white.withOpacity(0.3), borderRadius: BorderRadius.circular(2)),
@@ -1404,11 +1386,10 @@ class _BgGlow extends StatelessWidget {
   ]);
 }
 
-class _BgPainter2 extends StatelessWidget {
+class _BgPattern extends StatelessWidget {
   final int type; final Color color;
-  const _BgPainter2(this.type, this.color);
-  @override Widget build(BuildContext context) => type == 0
-      ? const SizedBox.expand()
+  const _BgPattern(this.type, this.color);
+  @override Widget build(BuildContext context) => type == 0 ? const SizedBox.expand()
       : CustomPaint(painter: _BgCP(type, color.withOpacity(0.05)), child: const SizedBox.expand());
 }
 
@@ -1572,10 +1553,7 @@ class _SliderRow extends StatelessWidget {
         Text(label, style: TextStyle(color: Colors.white.withOpacity(0.8), fontSize: 14)),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-          decoration: BoxDecoration(
-            color: accent.withOpacity(0.18),
-            borderRadius: BorderRadius.circular(12),
-          ),
+          decoration: BoxDecoration(color: accent.withOpacity(0.18), borderRadius: BorderRadius.circular(12)),
           child: Text(valLabel, style: TextStyle(color: accent, fontWeight: FontWeight.w700, fontSize: 12)),
         ),
       ]),
